@@ -126,7 +126,9 @@ function discoverPhpClasses(root) {
     while ((m = classRe.exec(content)) !== null) {
       const className = m[1];
       const fqn = namespace ? `${namespace}\\${className}` : className;
-      classes.push({ className, fqn });
+      // Count lines up to match offset so we can jump to the declaration
+      const lineNum = content.slice(0, m.index).split('\n').length - 1;
+      classes.push({ className, fqn, file, line: lineNum });
     }
   }
 
@@ -201,6 +203,19 @@ function getPhpClassCompletions(lineText, character, lineNum, fileText, root) {
 
 function isPhpFile(uri) {
   return uri.endsWith('.php') && !isBladeFile(uri);
+}
+
+// Extract the word (class name) the cursor is sitting on
+function classNameAtPosition(text, line, character) {
+  const lineText = text.split('\n')[line] || '';
+  // Expand left and right to grab the full word
+  let start = character;
+  let end = character;
+  while (start > 0 && /\w/.test(lineText[start - 1])) start--;
+  while (end < lineText.length && /\w/.test(lineText[end])) end++;
+  const word = lineText.slice(start, end);
+  // Only treat as a class name if it starts with uppercase
+  return /^[A-Z]/.test(word) ? word : null;
 }
 
 function findViewAtPosition(text, line, character) {
@@ -537,8 +552,34 @@ function handleMessage(msg) {
     }
 
     case 'textDocument/definition': {
-      const text = documents[params.textDocument.uri] || '';
+      const uri = params.textDocument.uri;
+      const text = documents[uri] || '';
       const { line, character } = params.position;
+
+      // PHP class jump-to-definition
+      if (isPhpFile(uri) && workspaceRoot) {
+        const className = classNameAtPosition(text, line, character);
+        if (className) {
+          const classes = discoverPhpClasses(workspaceRoot);
+          const found = classes.find(c => c.className === className);
+          if (found) {
+            send({
+              jsonrpc: '2.0', id,
+              result: {
+                uri: pathToUri(found.file),
+                range: {
+                  start: { line: found.line, character: 0 },
+                  end:   { line: found.line, character: 0 },
+                },
+              },
+            });
+            break;
+          }
+        }
+        send({ jsonrpc: '2.0', id, result: null });
+        break;
+      }
+
       const viewName = findViewAtPosition(text, line, character);
 
       if (!viewName || !workspaceRoot) {
