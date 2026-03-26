@@ -27,6 +27,83 @@ function isBladeFile(uri) {
   return uri.endsWith('.blade.php');
 }
 
+// ─── View Variable Inference ────────────────────────────────────────────────
+
+function getViewNameFromUri(uri, root) {
+  const filePath = uriToPath(uri);
+  const viewsDir = path.join(root, 'resources', 'views') + path.sep;
+  if (!filePath.startsWith(viewsDir)) return null;
+  const relative = filePath.slice(viewsDir.length).replace(/\.blade\.php$/, '');
+  return relative.split(path.sep).join('.');
+}
+
+function collectPhpFiles(dir, results) {
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) collectPhpFiles(full, results);
+      else if (entry.name.endsWith('.php')) results.push(full);
+    }
+  } catch (_) {}
+}
+
+// Extract variable names from a PHP array literal starting at text[0] = '['
+function extractArrayKeys(text) {
+  const vars = [];
+  let depth = 0, i = 0;
+  let inner = '';
+  for (; i < text.length; i++) {
+    if (text[i] === '[') { depth++; if (depth === 1) continue; }
+    else if (text[i] === ']') { depth--; if (depth === 0) break; }
+    if (depth >= 1) inner += text[i];
+  }
+  const keyRe = /['"]([^'"]+)['"]\s*=>/g;
+  let m;
+  while ((m = keyRe.exec(inner)) !== null) vars.push(m[1]);
+  return vars;
+}
+
+// Extract variable names from compact(...) starting at text = "compact(...)"
+function extractCompactArgs(text) {
+  const vars = [];
+  const inner = text.match(/^compact\s*\(([^)]*)\)/);
+  if (!inner) return vars;
+  const strRe = /['"]([^'"]+)['"]/g;
+  let m;
+  while ((m = strRe.exec(inner[1])) !== null) vars.push(m[1]);
+  return vars;
+}
+
+function findViewVariables(viewName, root) {
+  const vars = new Set();
+  const files = [];
+  for (const dir of ['app', 'routes']) collectPhpFiles(path.join(root, dir), files);
+  try {
+    for (const f of fs.readdirSync(root))
+      if (f.endsWith('.php')) files.push(path.join(root, f));
+  } catch (_) {}
+
+  const escaped = viewName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const callRe = new RegExp(`view\\s*\\(\\s*['"]${escaped}['"]\\s*,\\s*`, 'g');
+
+  for (const file of files) {
+    let content;
+    try { content = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+    let m;
+    callRe.lastIndex = 0;
+    while ((m = callRe.exec(content)) !== null) {
+      const after = content.slice(callRe.lastIndex);
+      const extracted = after.trimStart().startsWith('compact')
+        ? extractCompactArgs(after.trimStart())
+        : after.trimStart().startsWith('[')
+          ? extractArrayKeys(after.trimStart())
+          : [];
+      for (const v of extracted) vars.add(v);
+    }
+  }
+  return [...vars];
+}
+
 function findViewAtPosition(text, line, character) {
   const lines = text.split('\n');
   if (line >= lines.length) return null;
@@ -259,7 +336,7 @@ function handleMessage(msg) {
             textDocumentSync: { openClose: true, change: 1 },
             definitionProvider: true,
             completionProvider: {
-              triggerCharacters: ['@'],
+              triggerCharacters: ['@', '$'],
               resolveProvider: false,
             },
           },
@@ -300,27 +377,54 @@ function handleMessage(msg) {
       const lineText = text.split('\n')[lineNum] || '';
 
       const completion = getBladeCompletions(lineText, character);
-      if (!completion) {
-        send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items: [] } });
+      if (completion) {
+        // Fix the line number in textEdit ranges (getBladeCompletions uses 0 as placeholder)
+        const items = completion.items.map(item => ({
+          ...item,
+          textEdit: {
+            ...item.textEdit,
+            range: {
+              start: { line: lineNum, character: item.textEdit.range.start.character },
+              end:   { line: lineNum, character: item.textEdit.range.end.character },
+            },
+          },
+        }));
+        send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items } });
         break;
       }
 
-      // Fix the line number in textEdit ranges (getBladeCompletions uses 0 as placeholder)
-      const items = completion.items.map(item => ({
-        ...item,
-        textEdit: {
-          ...item.textEdit,
-          range: {
-            start: { line: lineNum, character: item.textEdit.range.start.character },
-            end:   { line: lineNum, character: item.textEdit.range.end.character },
-          },
-        },
-      }));
+      // Variable completions: trigger on $, inside {{ }} or anywhere in the file
+      const beforeCursor = lineText.slice(0, character);
+      const varMatch = beforeCursor.match(/\$([a-zA-Z_]*)$/);
+      if (varMatch && workspaceRoot) {
+        const viewName = getViewNameFromUri(uri, workspaceRoot);
+        if (viewName) {
+          const viewVars = findViewVariables(viewName, workspaceRoot);
+          if (viewVars.length > 0) {
+            const typed = varMatch[1].toLowerCase();
+            const dollarStart = character - varMatch[0].length;
+            const items = viewVars
+              .filter(v => typed === '' || v.toLowerCase().startsWith(typed))
+              .map((v, i) => ({
+                label: `$${v}`,
+                kind: 6, // Variable
+                detail: 'View variable',
+                sortText: i.toString().padStart(4, '0'),
+                textEdit: {
+                  range: {
+                    start: { line: lineNum, character: dollarStart },
+                    end:   { line: lineNum, character },
+                  },
+                  newText: `$${v}`,
+                },
+              }));
+            send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items } });
+            break;
+          }
+        }
+      }
 
-      send({
-        jsonrpc: '2.0', id,
-        result: { isIncomplete: true, items },
-      });
+      send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: [] } });
       break;
     }
 
