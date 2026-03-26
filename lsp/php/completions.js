@@ -9,9 +9,14 @@ const { inferVariableType, inferCurrentClass }                     = require('./
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/** Build a snippet from raw params string */
-function buildSnippet(name, params) {
-  if (!params) return `${name}()`;
+/**
+ * Build a snippet/insertion text for a method.
+ * `nextChar` is the character immediately after the cursor — if it is already
+ * `(`, we skip adding parens so we don't end up with double `()`.
+ */
+function buildSnippet(name, params, nextChar) {
+  if (nextChar === '(') return name;       // parens already present
+  if (!params)         return `${name}()`;
   return `${name}($1)`;
 }
 
@@ -38,9 +43,19 @@ function makeOpts(root, fileText, context, callerVisibility) {
   };
 }
 
-/** Convert resolved methods+properties to LSP completion items */
-function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEnd, prefix) {
+/**
+ * Convert resolved methods+properties to LSP completion items.
+ *
+ * `labelPrefix`  — text prepended to the dropdown label   (e.g. '->')
+ * `insertPrefix` — text prepended to the inserted newText (e.g. '->')
+ *                  Pass null/'' when the range already covers the operator.
+ * `nextChar`     — character immediately after cursor; if '(' skip parens.
+ */
+function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEnd,
+                        labelPrefix, insertPrefix, nextChar) {
   const lc = typed.toLowerCase();
+  const lp = labelPrefix  || '';
+  const ip = insertPrefix || '';
 
   const methodItems = methods
     .filter(m => {
@@ -54,7 +69,7 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
         ? `scope ${label}(${callParams})`
         : `${m.visibility}${m.isStatic ? ' static' : ''} ${m.name}(${m.params || ''})`;
       return {
-        label:            (prefix || '') + label,
+        label:            lp + label,
         kind:             2, // Method
         detail,
         insertTextFormat: 2,
@@ -62,7 +77,7 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
         textEdit: {
           range:   { start: { line: lineNum, character: rangeStart },
                      end:   { line: lineNum, character: rangeEnd } },
-          newText: (prefix || '') + buildSnippet(label, callParams),
+          newText: ip + buildSnippet(label, callParams, nextChar),
         },
       };
     });
@@ -70,7 +85,7 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
   const propItems = properties
     .filter(p => !typed || p.name.toLowerCase().startsWith(lc))
     .map((p, i) => ({
-      label:            (prefix || '') + p.name,
+      label:            lp + p.name,
       kind:             10, // Property
       detail:           `${p.visibility}${p.isStatic ? ' static' : ''} $${p.name}`,
       insertTextFormat: 1,
@@ -78,7 +93,7 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
       textEdit: {
         range:   { start: { line: lineNum, character: rangeStart },
                    end:   { line: lineNum, character: rangeEnd } },
-        newText: (prefix || '') + p.name,
+        newText: ip + p.name,
       },
     }));
 
@@ -86,24 +101,30 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
 }
 
 /** Item builder for simple named method lists (ELOQUENT_METHODS, CHAIN_METHODS) */
-function methodItems(methods, typed, lineNum, rangeStart, rangeEnd, prefix) {
+function methodItems(methods, typed, lineNum, rangeStart, rangeEnd, prefix, nextChar) {
   const filtered = typed
     ? methods.filter(m => m.name.toLowerCase().startsWith(typed.toLowerCase()))
     : methods;
   if (!filtered.length) return null;
 
-  return filtered.map((m, i) => ({
-    label:            (prefix || '') + m.name,
-    kind:             2,
-    detail:           (prefix || '') + m.name,
-    insertTextFormat: 2,
-    sortText:         i.toString().padStart(4, '0'),
-    textEdit: {
-      range:   { start: { line: lineNum, character: rangeStart },
-                 end:   { line: lineNum, character: rangeEnd } },
-      newText: (prefix || '') + m.snippet,
-    },
-  }));
+  return filtered.map((m, i) => {
+    // If next char is '(', strip the trailing '(...)' from the snippet
+    const snippet = nextChar === '('
+      ? (prefix || '') + m.name
+      : (prefix || '') + m.snippet;
+    return {
+      label:            (prefix || '') + m.name,
+      kind:             2,
+      detail:           (prefix || '') + m.name,
+      insertTextFormat: 2,
+      sortText:         i.toString().padStart(4, '0'),
+      textEdit: {
+        range:   { start: { line: lineNum, character: rangeStart },
+                   end:   { line: lineNum, character: rangeEnd } },
+        newText: snippet,
+      },
+    };
+  });
 }
 
 // ── $this-> completions ──────────────────────────────────────────────────────
@@ -115,6 +136,7 @@ function thisCompletions(lineText, character, lineNum, fileText, root) {
 
   const typed      = match[1];
   const arrowStart = character - 2 - typed.length;
+  const nextChar   = lineText[character] || '';
 
   const className = inferCurrentClass(fileText, lineNum);
   if (!className) return null;
@@ -122,7 +144,7 @@ function thisCompletions(lineText, character, lineNum, fileText, root) {
   const opts = makeOpts(root, fileText, 'instance', 'inside');
   const { methods, properties } = resolveMembers(className, opts);
 
-  const items = membersToItems(methods, properties, typed, lineNum, arrowStart, character, '->');
+  const items = membersToItems(methods, properties, typed, lineNum, arrowStart, character, '->', '->', nextChar);
   return items.length ? items : null;
 }
 
@@ -135,6 +157,7 @@ function selfCompletions(lineText, character, lineNum, fileText, root) {
 
   const typed      = match[1];
   const colonStart = character - 2 - typed.length;
+  const nextChar   = lineText[character] || '';
 
   const className = inferCurrentClass(fileText, lineNum);
   if (!className) return null;
@@ -142,7 +165,7 @@ function selfCompletions(lineText, character, lineNum, fileText, root) {
   const opts = makeOpts(root, fileText, 'static', 'inside');
   const { methods, properties } = resolveMembers(className, opts);
 
-  const items = membersToItems(methods, properties, typed, lineNum, colonStart, character, '::');
+  const items = membersToItems(methods, properties, typed, lineNum, colonStart, character, '::', '::', nextChar);
   return items.length ? items : null;
 }
 
@@ -155,6 +178,7 @@ function parentCompletions(lineText, character, lineNum, fileText, root) {
 
   const typed      = match[1];
   const colonStart = character - 2 - typed.length;
+  const nextChar   = lineText[character] || '';
 
   const currentClass = inferCurrentClass(fileText, lineNum);
   if (!currentClass) return null;
@@ -165,7 +189,7 @@ function parentCompletions(lineText, character, lineNum, fileText, root) {
   const opts = makeOpts(root, fileText, 'instance', 'inside');
   const { methods, properties } = resolveMembers(appClass.extends, opts);
 
-  const items = membersToItems(methods, properties, typed, lineNum, colonStart, character, '::');
+  const items = membersToItems(methods, properties, typed, lineNum, colonStart, character, '::', '::', nextChar);
   return items.length ? items : null;
 }
 
@@ -180,6 +204,7 @@ function varChainCompletions(lineText, character, lineNum, fileText, root) {
   const varName    = match[1];
   const typed      = match[2];
   const arrowStart = character - 2 - typed.length;
+  const nextChar   = lineText[character] || '';
 
   const className = inferVariableType(varName, fileText, lineNum);
   if (!className) return null;
@@ -187,7 +212,7 @@ function varChainCompletions(lineText, character, lineNum, fileText, root) {
   const opts = makeOpts(root, fileText, 'instance', 'outside');
   const { methods, properties } = resolveMembers(className, opts);
 
-  const items = membersToItems(methods, properties, typed, lineNum, arrowStart, character, '->');
+  const items = membersToItems(methods, properties, typed, lineNum, arrowStart, character, '->', '->', nextChar);
   return items.length ? items : null;
 }
 
@@ -202,6 +227,7 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
   const className   = match[1];
   const typedMethod = before.slice(before.lastIndexOf('::') + 2);
   const methodStart = character - typedMethod.length;
+  const nextChar    = lineText[character] || '';
 
   const entry = discoverPhpClasses(root).find(c => c.className === className)
              || getVendorClass(className, fileText, root);
@@ -219,7 +245,10 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
       methods = [...methods, ...eloquentMethods.filter(m => !seen.has(m.name))];
     }
 
-    const items = membersToItems(methods, properties, typedMethod, lineNum, methodStart, character, '::');
+    // Range starts AFTER '::' so no '::' prefix in newText.
+    // Label prefix 'ClassName::method' shown for context; insertPrefix empty.
+    const items = membersToItems(methods, properties, typedMethod, lineNum, methodStart, character,
+                                 '', '', nextChar);
     if (items.length) return items;
   }
 
@@ -243,17 +272,18 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
     }
   }
 
-  return methodItems(methods, typedMethod, lineNum, methodStart, character, null);
+  return methodItems(methods, typedMethod, lineNum, methodStart, character, null, nextChar);
 }
 
 // ── -> chain completions (generic, unknown type) ──────────────────────────────
 
 function chainCompletions(lineText, character, lineNum) {
-  const before = lineText.slice(0, character);
+  const before   = lineText.slice(0, character);
+  const nextChar = lineText[character] || '';
 
   // Case A: lone '-' after an expression end
   if (/[)\w\]]-$/.test(before))
-    return methodItems(CHAIN_METHODS, '', lineNum, character - 1, character, '->');
+    return methodItems(CHAIN_METHODS, '', lineNum, character - 1, character, '->', nextChar);
 
   // Case B: '->' with optional partial method
   const arrowMatch = before.match(/->([a-zA-Z_]*)$/);
@@ -261,7 +291,7 @@ function chainCompletions(lineText, character, lineNum) {
 
   const typed      = arrowMatch[1];
   const arrowStart = character - 2 - typed.length;
-  return methodItems(CHAIN_METHODS, typed, lineNum, arrowStart, character, '->');
+  return methodItems(CHAIN_METHODS, typed, lineNum, arrowStart, character, '->', nextChar);
 }
 
 // ── Class name + auto-import completions ─────────────────────────────────────
@@ -275,23 +305,44 @@ function classImportCompletions(lineText, character, lineNum, fileText, root) {
 
   const typed     = wordMatch[1];
   const wordStart = character - typed.length;
-  const isNew     = /\bnew\s+$/.test(before.slice(0, wordStart));
   const insertAt  = getUseInsertLine(fileText);
+  const nextChar  = lineText[character] || '';
+
+  // Context detection:
+  //   `new User`           → insert `User($1)` (or `User` if `(` already follows)
+  //   `function foo(User ` → type hint, insert plain `User`
+  //   everything else      → insert `User::` so static completions trigger immediately
+  const isNew      = /\bnew\s+$/.test(before.slice(0, wordStart));
+  const isTypeHint = /^\s*\$/.test(lineText.slice(character));
 
   const items = discoverPhpClasses(root)
     .filter(c => c.className.toLowerCase().startsWith(typed.toLowerCase()))
     .map((c, i) => {
+      let newText;
+      let insertTextFormat;
+      if (isNew) {
+        newText          = nextChar === '(' ? c.className : `${c.className}($1)`;
+        insertTextFormat = nextChar === '(' ? 1 : 2;
+      } else if (isTypeHint) {
+        newText          = c.className;
+        insertTextFormat = 1;
+      } else {
+        // Append '::' → static completions fire on next keystroke
+        newText          = `${c.className}::`;
+        insertTextFormat = 1;
+      }
+
       const imported = isAlreadyImported(fileText, c.fqn);
       const item = {
         label:            c.className,
         kind:             7,
         detail:           c.fqn,
-        insertTextFormat: isNew ? 2 : 1,
+        insertTextFormat,
         sortText:         i.toString().padStart(4, '0'),
         textEdit: {
           range:   { start: { line: lineNum, character: wordStart },
                      end:   { line: lineNum, character } },
-          newText: isNew ? `${c.className}($1)` : c.className,
+          newText,
         },
       };
       if (!imported) {
