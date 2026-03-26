@@ -13,17 +13,18 @@ zed-laravel/
 ├── extension.toml              # Extension manifest (id, version, LSP registration)
 ├── Cargo.toml                  # Rust crate (cdylib → WASM)
 ├── src/
-│   └── lib.rs                  # Rust bootstrap — embeds & launches view-lsp.js
+│   └── lib.rs                  # Rust bootstrap — embeds all LSP modules & launches server.js
 ├── lsp/
-│   └── view-lsp.js             # Node.js LSP server (all features live here)
-│       ├── §1  Infrastructure      send / URI helpers / file-type guards
-│       ├── §2  PHP › Discovery     class cache, namespace extraction, import helpers
-│       ├── §3  PHP › Completions   class import · ClassName:: · ->chain
-│       ├── §4  PHP › Definition    jump to class declaration
-│       ├── §5  Blade › Views       path resolution, variable inference, file creation
-│       ├── §6  Blade › Completions @directives · $variables
-│       ├── §7  Message handler     thin LSP router
-│       └── §8  JSON-RPC parser     stdin framing
+│   ├── server.js               # Entry point: infrastructure, LSP handler, JSON-RPC parser
+│   ├── php/
+│   │   ├── data.js             # ELOQUENT_METHODS, CHAIN_METHODS (pure data — edit to add methods)
+│   │   ├── discovery.js        # Class cache, namespace extraction, use-import helpers
+│   │   ├── completions.js      # phpCompletions(): class import · ClassName:: · ->chain
+│   │   └── definition.js       # phpDefinition(): jump to class declaration
+│   └── blade/
+│       ├── data.js             # BLADE_SNIPPETS (pure data — edit to add directives)
+│       ├── views.js            # View path resolution, variable inference, file creation
+│       └── completions.js      # bladeCompletions(): @directives · $variables
 └── grammars/
     └── blade/                  # tree-sitter-blade grammar (syntax highlighting)
         ├── grammar.js

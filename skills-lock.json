@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-builder": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "63de989925e749a0023261ea03dbcb1b86839de1c09b55fd9a82674d01e0485a"
+    },
+    "creating-agent-skills": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "f832d967ea7a915d0644fa599d77269a0a6880c09fe837206eb0b29a4d4642d9"
+    },
+    "creating-agents-md": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "e65764fa1a66a0c231662347ca26b6f14aaaf2818eeb2d1822022aa2b0730e44"
+    },
+    "creating-zed-extensions": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "4cadabcf7644299b362cf97e0f9d40ceb7d21dc1e028beace68a8e14e7357e0a"
+    },
+    "documentation-standards": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "bb2a534e2315e382390a211ff96376c4b05a497d3c14fd49bcf415ae5b8b53a9"
+    },
+    "github-actions-testing": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "a49510e8119fd119510aec9f6d291535dc037f8ca0f76f7e11c8bdccfa99f0e7"
+    },
+    "self-improving": {
+      "source": "pr-pm/prpm",
+      "sourceType": "github",
+      "computedHash": "7d2f2d518405c23ff60f5868c15e1b32a09ffc1dd70bcf75ced03b2c5fb0c6c5"
+    }
+  }
+}
