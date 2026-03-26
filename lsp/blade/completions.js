@@ -27,8 +27,22 @@ function componentTagCompletions(lineText, character, lineNum, root) {
   let components;
   try { components = discoverComponents(root); } catch (_) { return null; }
 
+  // Match on full prefix OR any dot-segment prefix: <x-app matches layouts.app
+  function tagMatches(tagName) {
+    if (typed === '') return true;
+    if (tagName.startsWith(typed)) return true;
+    return tagName.split('.').some(seg => seg.startsWith(typed));
+  }
+
+  // Rank: exact prefix beats segment match, so sort prefix matches first
+  function sortKey(tagName, idx) {
+    const rank = tagName.startsWith(typed) ? '0' : '1';
+    // \x00 prefix ensures all our items sort above Emmet completions
+    return '\x00' + rank + tagName;
+  }
+
   const items = components
-    .filter(c => typed === '' || c.tagName.startsWith(typed))
+    .filter(c => tagMatches(c.tagName))
     .map((c, i) => {
       const label  = `x-${c.tagName}`;
       const detail = c.isAnonymous
@@ -40,7 +54,7 @@ function componentTagCompletions(lineText, character, lineNum, root) {
         kind:             10, // Property
         detail,
         insertTextFormat: 2,  // Snippet
-        sortText:         i.toString().padStart(4, '0'),
+        sortText:         sortKey(c.tagName, i),
         textEdit: {
           range: {
             start: { line: lineNum, character: xStart },
