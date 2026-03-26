@@ -8,7 +8,8 @@ repository = "https://github.com/hotdogb/zed-laravel"
 
 [language_servers.laravel-view-lsp]
 language = "PHP"
-languages = []
+languages = ["PHP", "Blade"]
 
 [language_servers.laravel-view-lsp.language_ids]
 PHP = "php"
+Blade = "blade"
