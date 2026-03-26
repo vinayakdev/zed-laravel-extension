@@ -15,6 +15,18 @@ function buildSnippet(name, params) {
   return `${name}($1)`;
 }
 
+/**
+ * For scope methods, strip the first `Builder $query` parameter — that's
+ * injected by Laravel and invisible to the caller.
+ * e.g. `Builder $query, string $type` → `string $type`
+ */
+function scopeCallParams(params) {
+  if (!params) return '';
+  const parts = params.split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length > 0 && /\bBuilder\b/.test(parts[0])) parts.shift();
+  return parts.join(', ');
+}
+
 /** Build opts object for resolveMembers */
 function makeOpts(root, fileText, context, callerVisibility) {
   return {
@@ -31,19 +43,29 @@ function membersToItems(methods, properties, typed, lineNum, rangeStart, rangeEn
   const lc = typed.toLowerCase();
 
   const methodItems = methods
-    .filter(m => !typed || m.name.toLowerCase().startsWith(lc))
-    .map((m, i) => ({
-      label:            (prefix || '') + m.name,
-      kind:             2, // Method
-      detail:           `${m.visibility}${m.isStatic ? ' static' : ''} ${m.name}(${m.params || ''})`,
-      insertTextFormat: 2,
-      sortText:         i.toString().padStart(4, '0'),
-      textEdit: {
-        range:   { start: { line: lineNum, character: rangeStart },
-                   end:   { line: lineNum, character: rangeEnd } },
-        newText: (prefix || '') + buildSnippet(m.name, m.params),
-      },
-    }));
+    .filter(m => {
+      const label = m.isScope ? m.scopeName : m.name;
+      return !typed || label.toLowerCase().startsWith(lc);
+    })
+    .map((m, i) => {
+      const label      = m.isScope ? m.scopeName  : m.name;
+      const callParams = m.isScope ? scopeCallParams(m.params) : (m.params || '');
+      const detail     = m.isScope
+        ? `scope ${label}(${callParams})`
+        : `${m.visibility}${m.isStatic ? ' static' : ''} ${m.name}(${m.params || ''})`;
+      return {
+        label:            (prefix || '') + label,
+        kind:             2, // Method
+        detail,
+        insertTextFormat: 2,
+        sortText:         i.toString().padStart(4, '0'),
+        textEdit: {
+          range:   { start: { line: lineNum, character: rangeStart },
+                     end:   { line: lineNum, character: rangeEnd } },
+          newText: (prefix || '') + buildSnippet(label, callParams),
+        },
+      };
+    });
 
   const propItems = properties
     .filter(p => !typed || p.name.toLowerCase().startsWith(lc))

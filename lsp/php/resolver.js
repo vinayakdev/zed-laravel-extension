@@ -81,6 +81,8 @@ function applyFilters({ methods, properties }, opts) {
 
   // Visibility predicate
   function visOk(member) {
+    // Scope methods are always externally callable via Laravel's __callStatic magic
+    if (member.isScope) return true;
     if (vis === 'outside') {
       return member.visibility === 'public';
     }
@@ -91,6 +93,8 @@ function applyFilters({ methods, properties }, opts) {
 
   // Context predicate for methods
   function ctxOk(method) {
+    // Scope methods are always callable in static context on models
+    if (method.isScope) return true;
     if (ctx === 'static') {
       return method.isStatic === true;
     }

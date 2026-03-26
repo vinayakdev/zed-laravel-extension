@@ -84,18 +84,41 @@ function parseTraits(classBody) {
 
 /**
  * Parse methods declared inside a class body.
+ * Detects local scope methods in two styles:
+ *   - New: `#[Scope]` PHP attribute on the line immediately before the method
+ *   - Old: method name prefixed with `scope` + uppercase letter (e.g. `scopePopular`)
+ * Scope methods are marked `isScope: true` with a `scopeName` (the caller-facing name).
  */
 function parseMethods(classBody) {
   const methodRe = /^\s*(public|protected|private)?\s*(static\s+)?(?:abstract\s+|final\s+)?function\s+(\w+)\s*\(([^)]*)\)/gm;
   const methods = [];
   let m;
   while ((m = methodRe.exec(classBody)) !== null) {
-    methods.push({
-      name:       m[3],
-      params:     m[4].trim(),
-      isStatic:   !!m[2],
-      visibility: m[1] || 'public',
-    });
+    const name       = m[3];
+    const visibility = m[1] || 'public';
+    const isStatic   = !!m[2];
+
+    // Check for #[Scope] attribute on the immediately preceding non-blank line
+    const before    = classBody.slice(0, m.index);
+    const prevLines = before.trimEnd().split('\n');
+    const prevLine  = prevLines[prevLines.length - 1] || '';
+    const hasAttrScope = /^\s*#\[Scope\]/.test(prevLine);
+
+    // Check for old-style scopeXxx naming convention
+    const oldScopeMatch = name.match(/^scope([A-Z]\w*)$/);
+
+    let isScope   = false;
+    let scopeName = null;
+    if (hasAttrScope) {
+      isScope   = true;
+      scopeName = name; // attribute style: method name IS the scope name
+    } else if (oldScopeMatch) {
+      isScope   = true;
+      // scopePopular → popular, scopeOfType → ofType
+      scopeName = oldScopeMatch[1].charAt(0).toLowerCase() + oldScopeMatch[1].slice(1);
+    }
+
+    methods.push({ name, params: m[4].trim(), isStatic, visibility, isScope, scopeName });
   }
   return methods;
 }
