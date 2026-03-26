@@ -171,18 +171,23 @@ function handleMessage(msg) {
       }
 
       if (isBladeFile(uri) && workspaceRoot) {
-        // Check if cursor is on an x-component tag
-        const xTag = findXTagAtPosition(text, line, character);
-        if (xTag) {
-          const { classFile, viewFile } = componentTagToFiles(xTag, workspaceRoot);
-          const locs = [];
-          if (classFile && fs.existsSync(classFile))
-            locs.push({ uri: pathToUri(classFile), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
-          if (viewFile && fs.existsSync(viewFile))
-            locs.push({ uri: pathToUri(viewFile),  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
-          send({ jsonrpc: '2.0', id, result: locs.length ? locs : null });
-          break;
-        }
+        // Check if cursor is on an x-component tag — only handle if we find files,
+        // otherwise fall through to the view() navigation below.
+        try {
+          const xTag = findXTagAtPosition(text, line, character);
+          if (xTag) {
+            const { classFile, viewFile } = componentTagToFiles(xTag, workspaceRoot);
+            const locs = [];
+            if (classFile && fs.existsSync(classFile))
+              locs.push({ uri: pathToUri(classFile), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
+            if (viewFile && fs.existsSync(viewFile))
+              locs.push({ uri: pathToUri(viewFile),  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
+            if (locs.length) {
+              send({ jsonrpc: '2.0', id, result: locs });
+              break;
+            }
+          }
+        } catch (_) {}
 
         const viewName = findViewAtPosition(text, line, character);
         if (!viewName) { send({ jsonrpc: '2.0', id, result: null }); break; }
