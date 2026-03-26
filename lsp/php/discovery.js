@@ -257,12 +257,24 @@ function invalidateCache() { cache = null; }
 
 function getUseInsertLine(text) {
   const lines = text.split('\n');
-  let lastUse = -1, namespaceLine = -1, phpTag = -1;
+
+  // Only look at lines before the first class/interface/trait/enum declaration.
+  // `use Foo;` lines inside a class body are trait imports, not namespace
+  // imports, and must not be mistaken for the insertion point.
+  let classLine = lines.length;
   for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+/.test(lines[i])) {
+      classLine = i;
+      break;
+    }
+  }
+
+  let lastUse = -1, namespaceLine = -1, phpTag = -1;
+  for (let i = 0; i < classLine; i++) {
     const t = lines[i].trim();
-    if (phpTag       === -1 && t.startsWith('<?php'))  phpTag        = i;
-    if (t.startsWith('namespace '))                     namespaceLine = i;
-    if (t.startsWith('use '))                           lastUse       = i;
+    if (phpTag === -1 && t.startsWith('<?php')) phpTag        = i;
+    if (t.startsWith('namespace '))             namespaceLine = i;
+    if (t.startsWith('use '))                   lastUse       = i;
   }
   if (lastUse       >= 0) return lastUse + 1;
   if (namespaceLine >= 0) return namespaceLine + 2;
