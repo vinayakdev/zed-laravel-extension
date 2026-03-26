@@ -166,7 +166,24 @@ function handleMessage(msg) {
       const { line, character } = params.position;
 
       if (isPhpFile(uri) && workspaceRoot) {
-        send({ jsonrpc: '2.0', id, result: phpDefinition(text, line, character, workspaceRoot, pathToUri) });
+        // Try class-name navigation first; fall through to view() navigation if it returns nothing
+        const classDef = phpDefinition(text, line, character, workspaceRoot, pathToUri);
+        if (classDef) { send({ jsonrpc: '2.0', id, result: classDef }); break; }
+
+        // view('some.view') in controllers / routes
+        const viewName = findViewAtPosition(text, line, character);
+        if (viewName) {
+          const filePath = resolveViewPath(viewName, workspaceRoot);
+          if (fs.existsSync(filePath)) {
+            send({ jsonrpc: '2.0', id, result: { uri: pathToUri(filePath),
+                   range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } } });
+          } else {
+            send({ jsonrpc: '2.0', id, result: null });
+          }
+          break;
+        }
+
+        send({ jsonrpc: '2.0', id, result: null });
         break;
       }
 
