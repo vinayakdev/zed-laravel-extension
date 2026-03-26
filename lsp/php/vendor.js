@@ -11,6 +11,13 @@ const classmapCache = new Map();
 /** Map<className, entry> — parsed vendor class entries, never invalidated */
 const vendorClassCache = new Map();
 
+/**
+ * Map<root, Map<shortName, Array<{fqn, filePath}>>>
+ * Built once per root from the classmap so we can search vendor classes
+ * by short name prefix without parsing any files upfront.
+ */
+const shortNameIndexCache = new Map();
+
 // ── Classmap parser ───────────────────────────────────────────────────────────
 
 /**
@@ -185,20 +192,21 @@ function parseVendorFile(filePath, expectedClassName) {
     return null;
   }
 
-  const classRe = /^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w,\s]+))?/m;
+  const classRe = /^\s*(?:(?:abstract|final|readonly)\s+)*(?:(class|interface|trait|enum))\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w,\s]+))?/m;
   const classMatch = classRe.exec(content);
   if (!classMatch) return null;
 
-  const className = classMatch[1];
+  const kind      = classMatch[1]; // 'class' | 'interface' | 'trait' | 'enum'
+  const className = classMatch[2];
   const lineNum   = content.slice(0, classMatch.index).split('\n').length - 1;
 
   const nsMatch   = content.match(/^\s*namespace\s+([\w\\]+)\s*;/m);
   const namespace = nsMatch ? nsMatch[1] : null;
   const fqn       = namespace ? `${namespace}\\${className}` : className;
 
-  const extendsName    = classMatch[2] ? classMatch[2].trim() : null;
-  const implementsList = classMatch[3]
-    ? classMatch[3].split(',').map(s => s.trim()).filter(Boolean)
+  const extendsName    = classMatch[3] ? classMatch[3].trim() : null;
+  const implementsList = classMatch[4]
+    ? classMatch[4].split(',').map(s => s.trim()).filter(Boolean)
     : [];
 
   const openBraceIdx = findClassBodyStart(content, classMatch.index);
@@ -215,6 +223,7 @@ function parseVendorFile(filePath, expectedClassName) {
 
   return {
     className:   expectedClassName || className,
+    kind,          // 'class' | 'interface' | 'trait' | 'enum'
     fqn,
     file:        filePath,
     line:        lineNum,
@@ -261,6 +270,52 @@ function getVendorClass(className, fileText, root) {
   return entry;
 }
 
+// ── Short-name index ──────────────────────────────────────────────────────────
+
+/**
+ * Build (once per root) a Map<shortName, Array<{fqn, filePath}>> from the
+ * Composer classmap.  Allows prefix-searching vendor classes by their short
+ * name without reading any PHP files.
+ */
+function getShortNameIndex(root) {
+  if (shortNameIndexCache.has(root)) return shortNameIndexCache.get(root);
+
+  const classmap = parseClassmap(root);
+  const index    = new Map();
+  for (const [fqn, filePath] of classmap) {
+    const shortName = fqn.split('\\').pop();
+    if (!index.has(shortName)) index.set(shortName, []);
+    index.get(shortName).push({ fqn, filePath });
+  }
+  shortNameIndexCache.set(root, index);
+  return index;
+}
+
+/**
+ * Return all vendor classes whose short name starts with `prefix`.
+ * Results are lightweight { className, fqn, kind } objects — no file I/O.
+ * `kind` is filled from vendorClassCache if the entry has already been
+ * parsed (e.g. by the prefetcher), otherwise defaults to 'class'.
+ */
+function searchVendorByPrefix(prefix, root) {
+  if (!prefix || !root) return [];
+  const lc    = prefix.toLowerCase();
+  const index = getShortNameIndex(root);
+  const out   = [];
+  for (const [shortName, entries] of index) {
+    if (!shortName.toLowerCase().startsWith(lc)) continue;
+    for (const { fqn } of entries) {
+      const cached = vendorClassCache.get(shortName);
+      out.push({
+        className: shortName,
+        fqn,
+        kind: cached ? cached.kind : 'class', // best-effort without parsing
+      });
+    }
+  }
+  return out;
+}
+
 /**
  * Pre-populate the vendor class cache from a file path without needing
  * a calling file's use-statements.  Called by the background prefetcher.
@@ -284,4 +339,4 @@ function invalidateClassmap() {
   classmapCache.clear();
 }
 
-module.exports = { getVendorClass, warmVendorCache, invalidateClassmap };
+module.exports = { getVendorClass, searchVendorByPrefix, warmVendorCache, invalidateClassmap };

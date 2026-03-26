@@ -4,7 +4,7 @@ const fs = require('fs');
 const { discoverPhpClasses, getUseInsertLine, isAlreadyImported } = require('./discovery');
 const { ELOQUENT_METHODS, CHAIN_METHODS }                          = require('./data');
 const { resolveMembers }                                           = require('./resolver');
-const { getVendorClass }                                           = require('./vendor');
+const { getVendorClass, searchVendorByPrefix }                     = require('./vendor');
 const { inferVariableType, inferCurrentClass }                     = require('./inference');
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -327,6 +327,53 @@ function chainCompletions(lineText, character, lineNum, fileText, root) {
 
 // ── Class name + auto-import completions ─────────────────────────────────────
 
+/** Build one LSP completion item for a class/trait/interface */
+function buildImportItem(entry, i, { lineNum, wordStart, character, insertAt,
+                                     isNew, isTypeHint, nextChar, fileText }) {
+  const { className, fqn, kind } = entry;
+
+  // Insertion text depends on context and kind:
+  //   new Foo     → Foo($1)  (or Foo if '(' already follows)
+  //   type hint   → Foo
+  //   trait       → Foo      (used with `use Foo;` inside a class, not Foo::)
+  //   class/enum  → Foo::    (triggers static completions immediately)
+  let newText;
+  let insertTextFormat;
+  if (isNew) {
+    newText          = nextChar === '(' ? className : `${className}($1)`;
+    insertTextFormat = nextChar === '(' ? 1 : 2;
+  } else if (isTypeHint || kind === 'trait' || kind === 'interface') {
+    newText          = className;
+    insertTextFormat = 1;
+  } else {
+    newText          = `${className}::`;
+    insertTextFormat = 1;
+  }
+
+  const imported = isAlreadyImported(fileText, fqn);
+  const item = {
+    label:            className,
+    kind:             kind === 'trait' ? 8 : 7, // 8=Interface used for traits too (closest LSP kind)
+    detail:           fqn,
+    insertTextFormat,
+    sortText:         i.toString().padStart(4, '0'),
+    textEdit: {
+      range:   { start: { line: lineNum, character: wordStart },
+                 end:   { line: lineNum, character } },
+      newText,
+    },
+  };
+  if (!imported) {
+    item.additionalTextEdits = [{
+      range:   { start: { line: insertAt, character: 0 },
+                 end:   { line: insertAt, character: 0 } },
+      newText: `use ${fqn};\n`,
+    }];
+    item.detail = `${fqn}  (auto-import)`;
+  }
+  return item;
+}
+
 function classImportCompletions(lineText, character, lineNum, fileText, root) {
   const before = lineText.slice(0, character);
   if (/::/.test(before.match(/[A-Z][a-zA-Z0-9_]*[^]*$/)?.[0] || '')) return null;
@@ -338,55 +385,25 @@ function classImportCompletions(lineText, character, lineNum, fileText, root) {
   const wordStart = character - typed.length;
   const insertAt  = getUseInsertLine(fileText);
   const nextChar  = lineText[character] || '';
-
-  // Context detection:
-  //   `new User`           → insert `User($1)` (or `User` if `(` already follows)
-  //   `function foo(User ` → type hint, insert plain `User`
-  //   everything else      → insert `User::` so static completions trigger immediately
   const isNew      = /\bnew\s+$/.test(before.slice(0, wordStart));
   const isTypeHint = /^\s*\$/.test(lineText.slice(character));
+  const ctx        = { lineNum, wordStart, character, insertAt, isNew, isTypeHint, nextChar, fileText };
 
-  const items = discoverPhpClasses(root)
-    .filter(c => c.className.toLowerCase().startsWith(typed.toLowerCase()))
-    .map((c, i) => {
-      let newText;
-      let insertTextFormat;
-      if (isNew) {
-        newText          = nextChar === '(' ? c.className : `${c.className}($1)`;
-        insertTextFormat = nextChar === '(' ? 1 : 2;
-      } else if (isTypeHint) {
-        newText          = c.className;
-        insertTextFormat = 1;
-      } else {
-        // Append '::' → static completions fire on next keystroke
-        newText          = `${c.className}::`;
-        insertTextFormat = 1;
-      }
+  // App classes (app/ directory)
+  const appClasses = discoverPhpClasses(root)
+    .filter(c => c.className.toLowerCase().startsWith(typed.toLowerCase()));
+  const appNames = new Set(appClasses.map(c => c.className));
 
-      const imported = isAlreadyImported(fileText, c.fqn);
-      const item = {
-        label:            c.className,
-        kind:             7,
-        detail:           c.fqn,
-        insertTextFormat,
-        sortText:         i.toString().padStart(4, '0'),
-        textEdit: {
-          range:   { start: { line: lineNum, character: wordStart },
-                     end:   { line: lineNum, character } },
-          newText,
-        },
-      };
-      if (!imported) {
-        item.additionalTextEdits = [{
-          range:   { start: { line: insertAt, character: 0 },
-                     end:   { line: insertAt, character: 0 } },
-          newText: `use ${c.fqn};\n`,
-        }];
-        item.detail = `${c.fqn}  (auto-import)`;
-      }
-      return item;
-    });
+  // Vendor classes (from Composer classmap short-name index — no file reads)
+  const vendorMatches = searchVendorByPrefix(typed, root)
+    .filter(v => !appNames.has(v.className)); // app classes take priority
 
+  const allEntries = [
+    ...appClasses.map(c => ({ className: c.className, fqn: c.fqn, kind: 'class' })),
+    ...vendorMatches,
+  ];
+
+  const items = allEntries.map((entry, i) => buildImportItem(entry, i, ctx));
   return items.length ? items : null;
 }
 
