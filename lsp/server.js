@@ -11,6 +11,7 @@ const { phpDefinition }   = require('./php/definition');
 const { invalidateCache } = require('./php/discovery');
 const { bladeCompletions } = require('./blade/completions');
 const { resolveViewPath, createBladeFile, findViewAtPosition } = require('./blade/views');
+const { discoverComponents, invalidateComponentCache, componentTagToFiles } = require('./blade/components');
 
 // ── §1  Infrastructure ───────────────────────────────────────────────────────
 
@@ -64,6 +65,30 @@ function handleCreateResponse(id, result) {
          params: { type: 3, message: `Created: resources/views/${viewName.replace(/\./g, '/')}.blade.php` } });
 }
 
+// ── x-component tag position helper ─────────────────────────────────────────
+
+/**
+ * Scan the line for all `<x-tagname` occurrences and check whether the cursor
+ * falls within any tag's span (covering `x`, `-`, and the tag name chars).
+ * Returns the tag name (e.g. "alert", "forms.input") or null.
+ *
+ * Using a full-line scan rather than word-expansion means the cursor can sit
+ * on `x`, `-`, or any letter of the tag name and still resolve correctly.
+ */
+function findXTagAtPosition(text, line, character) {
+  const lineText = text.split('\n')[line] || '';
+  const re = /<x-([\w.-]+)/g;
+  let m;
+  while ((m = re.exec(lineText)) !== null) {
+    const spanStart = m.index + 1;           // position of 'x' (after '<')
+    const spanEnd   = m.index + m[0].length; // position after last tag char
+    if (character >= spanStart && character <= spanEnd) {
+      return m[1]; // the tag name, e.g. "forms.input"
+    }
+  }
+  return null;
+}
+
 // ── §7  Message handler ──────────────────────────────────────────────────────
 
 function handleMessage(msg) {
@@ -96,16 +121,24 @@ function handleMessage(msg) {
     case 'exit':        process.exit(0);
 
     // Document sync
-    case 'textDocument/didOpen':
-      documents[params.textDocument.uri] = params.textDocument.text;
-      if (isPhpFile(params.textDocument.uri)) invalidateCache();
+    case 'textDocument/didOpen': {
+      const openUri = params.textDocument.uri;
+      documents[openUri] = params.textDocument.text;
+      if (isPhpFile(openUri)) invalidateCache();
+      if (isPhpFile(openUri)   && openUri.includes('/app/View/Components/'))        invalidateComponentCache();
+      if (isBladeFile(openUri) && openUri.includes('/resources/views/components/')) invalidateComponentCache();
       break;
+    }
 
-    case 'textDocument/didChange':
+    case 'textDocument/didChange': {
+      const changeUri = params.textDocument.uri;
       if (params.contentChanges.length > 0)
-        documents[params.textDocument.uri] = params.contentChanges[params.contentChanges.length - 1].text;
-      if (isPhpFile(params.textDocument.uri)) invalidateCache();
+        documents[changeUri] = params.contentChanges[params.contentChanges.length - 1].text;
+      if (isPhpFile(changeUri)) invalidateCache();
+      if (isPhpFile(changeUri)   && changeUri.includes('/app/View/Components/'))        invalidateComponentCache();
+      if (isBladeFile(changeUri) && changeUri.includes('/resources/views/components/')) invalidateComponentCache();
       break;
+    }
 
     case 'textDocument/didClose':
       delete documents[params.textDocument.uri];
@@ -138,6 +171,19 @@ function handleMessage(msg) {
       }
 
       if (isBladeFile(uri) && workspaceRoot) {
+        // Check if cursor is on an x-component tag
+        const xTag = findXTagAtPosition(text, line, character);
+        if (xTag) {
+          const { classFile, viewFile } = componentTagToFiles(xTag, workspaceRoot);
+          const locs = [];
+          if (classFile && fs.existsSync(classFile))
+            locs.push({ uri: pathToUri(classFile), range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
+          if (viewFile && fs.existsSync(viewFile))
+            locs.push({ uri: pathToUri(viewFile),  range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } });
+          send({ jsonrpc: '2.0', id, result: locs.length ? locs : null });
+          break;
+        }
+
         const viewName = findViewAtPosition(text, line, character);
         if (!viewName) { send({ jsonrpc: '2.0', id, result: null }); break; }
 
