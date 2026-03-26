@@ -104,6 +104,105 @@ function findViewVariables(viewName, root) {
   return [...vars];
 }
 
+// ─── PHP Class Discovery & Import ───────────────────────────────────────────
+
+let phpClassCache = null;
+
+function discoverPhpClasses(root) {
+  if (phpClassCache) return phpClassCache;
+  const files = [];
+  collectPhpFiles(path.join(root, 'app'), files);
+
+  const classes = [];
+  for (const file of files) {
+    let content;
+    try { content = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
+
+    const nsMatch = content.match(/^\s*namespace\s+([\w\\]+)\s*;/m);
+    const namespace = nsMatch ? nsMatch[1] : null;
+
+    const classRe = /^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+(\w+)/gm;
+    let m;
+    while ((m = classRe.exec(content)) !== null) {
+      const className = m[1];
+      const fqn = namespace ? `${namespace}\\${className}` : className;
+      classes.push({ className, fqn });
+    }
+  }
+
+  phpClassCache = classes;
+  return classes;
+}
+
+// Find the line number where a new `use` statement should be inserted
+function getUseInsertLine(text) {
+  const lines = text.split('\n');
+  let lastUse = -1, namespaceLine = -1, phpTag = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (phpTag === -1 && t.startsWith('<?php')) phpTag = i;
+    if (t.startsWith('namespace '))             namespaceLine = i;
+    if (t.startsWith('use '))                   lastUse = i;
+  }
+  if (lastUse >= 0)       return lastUse + 1;
+  if (namespaceLine >= 0) return namespaceLine + 2;
+  if (phpTag >= 0)        return phpTag + 2;
+  return 0;
+}
+
+function isAlreadyImported(text, fqn) {
+  const esc = fqn.replace(/\\/g, '\\\\');
+  return new RegExp(`^\\s*use\\s+${esc}(\\s+as\\s+|;)`, 'm').test(text);
+}
+
+function getPhpClassCompletions(lineText, character, lineNum, fileText, root) {
+  const before = lineText.slice(0, character);
+  // Only trigger on words starting with an uppercase letter
+  const wordMatch = before.match(/\b([A-Z][a-zA-Z0-9_]*)$/);
+  if (!wordMatch) return null;
+
+  const typed = wordMatch[1];
+  const wordStart = character - typed.length;
+  const classes = discoverPhpClasses(root);
+  const insertLine = getUseInsertLine(fileText);
+
+  const items = classes
+    .filter(c => c.className.toLowerCase().startsWith(typed.toLowerCase()))
+    .map((c, i) => {
+      const alreadyImported = isAlreadyImported(fileText, c.fqn);
+      const item = {
+        label: c.className,
+        kind: 7, // Class
+        detail: c.fqn,
+        sortText: i.toString().padStart(4, '0'),
+        textEdit: {
+          range: {
+            start: { line: lineNum, character: wordStart },
+            end:   { line: lineNum, character },
+          },
+          newText: c.className,
+        },
+      };
+      if (!alreadyImported) {
+        item.additionalTextEdits = [{
+          range: {
+            start: { line: insertLine, character: 0 },
+            end:   { line: insertLine, character: 0 },
+          },
+          newText: `use ${c.fqn};\n`,
+        }];
+        item.detail = `${c.fqn}  (auto-import)`;
+      }
+      return item;
+    });
+
+  return items.length > 0 ? items : null;
+}
+
+function isPhpFile(uri) {
+  return uri.endsWith('.php') && !isBladeFile(uri);
+}
+
 function findViewAtPosition(text, line, character) {
   const lines = text.split('\n');
   if (line >= lines.length) return null;
@@ -350,6 +449,7 @@ function handleMessage(msg) {
 
     case 'textDocument/didOpen':
       documents[params.textDocument.uri] = params.textDocument.text;
+      if (isPhpFile(params.textDocument.uri)) phpClassCache = null;
       break;
 
     case 'textDocument/didChange':
@@ -357,6 +457,7 @@ function handleMessage(msg) {
         documents[params.textDocument.uri] =
           params.contentChanges[params.contentChanges.length - 1].text;
       }
+      if (isPhpFile(params.textDocument.uri)) phpClassCache = null;
       break;
 
     case 'textDocument/didClose':
@@ -366,15 +467,22 @@ function handleMessage(msg) {
     case 'textDocument/completion': {
       const uri = params.textDocument.uri;
 
-      // Blade snippets only make sense in .blade.php files
+      const text = documents[uri] || '';
+      const { line: lineNum, character } = params.position;
+      const lineText = text.split('\n')[lineNum] || '';
+
+      // PHP class / model completions (non-blade PHP files only)
+      if (isPhpFile(uri) && workspaceRoot) {
+        const items = getPhpClassCompletions(lineText, character, lineNum, text, workspaceRoot);
+        send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: items || [] } });
+        break;
+      }
+
+      // Everything below is Blade-only
       if (!isBladeFile(uri)) {
         send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: [] } });
         break;
       }
-
-      const text = documents[uri] || '';
-      const { line: lineNum, character } = params.position;
-      const lineText = text.split('\n')[lineNum] || '';
 
       const completion = getBladeCompletions(lineText, character);
       if (completion) {
