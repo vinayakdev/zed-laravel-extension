@@ -41,6 +41,12 @@ function componentTagCompletions(lineText, character, lineNum, root) {
     return '\x00' + rank + tagName;
   }
 
+  // filterText = exactly what the user has typed (e.g. "x-la").
+  // This makes every returned item score as an exact match in Zed's
+  // fuzzy scorer, equal to Emmet. Our \x00 sortText then wins the
+  // tiebreak, pushing Emmet below all our results.
+  const filterText = tagMatch[0].slice(1); // strips leading '<' → "x-la"
+
   const items = components
     .filter(c => tagMatches(c.tagName))
     .map((c, i) => {
@@ -53,6 +59,7 @@ function componentTagCompletions(lineText, character, lineNum, root) {
         label,
         kind:             10, // Property
         detail,
+        filterText,
         insertTextFormat: 2,  // Snippet
         sortText:         sortKey(c.tagName, i),
         textEdit: {
