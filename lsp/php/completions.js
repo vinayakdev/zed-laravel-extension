@@ -281,36 +281,44 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
 // ── -> chain completions (generic, unknown type) ──────────────────────────────
 
 /**
- * Returns scope methods for `className` as CHAIN_METHODS-shaped objects so
- * they can be mixed into the chain dropdown alongside generic builder methods.
+ * Returns all public instance methods of `className` as CHAIN_METHODS-shaped
+ * objects `{ name, snippet }`.  Checks both app classes and vendor (so
+ * Filament's TextInput, FileUpload etc. are included once the prefetcher has
+ * warmed the cache).  Scope methods are converted to their caller-facing name.
  */
-function scopeMethodsAsChain(className, root) {
+function classInstanceMembersAsChain(className, fileText, root) {
   if (!root) return [];
-  const entry = discoverPhpClasses(root).find(c => c.className === className);
+  const entry = discoverPhpClasses(root).find(c => c.className === className)
+             || getVendorClass(className, fileText, root);
   if (!entry) return [];
-  return (entry.methods || [])
-    .filter(m => m.isScope)
-    .map(m => {
-      const callParams = scopeCallParams(m.params);
-      return {
-        name:    m.scopeName,
-        snippet: callParams ? `${m.scopeName}($1)` : `${m.scopeName}()`,
-      };
-    });
+
+  const opts = makeOpts(root, fileText, 'instance', 'outside');
+  const { methods } = resolveMembers(className, opts);
+
+  return methods.map(m => {
+    const label      = m.isScope ? m.scopeName : m.name;
+    const callParams = m.isScope ? scopeCallParams(m.params) : (m.params || '');
+    return {
+      name:    label,
+      snippet: callParams ? `${label}($1)` : `${label}()`,
+    };
+  });
 }
 
 function chainCompletions(lineText, character, lineNum, fileText, root) {
   const before   = lineText.slice(0, character);
   const nextChar = lineText[character] || '';
 
-  // Detect if we're chaining off a known class (e.g. User::popular()->)
-  // so we can surface that model's scope methods in the chain dropdown.
+  // Detect if we're chaining off a known class (e.g. User::popular()->  or
+  // TextInput::make()->  ) so we can surface that class's instance methods.
   const chainClassMatch = before.match(/\b([A-Z][a-zA-Z0-9_]*)::/);
-  const scopeExtras     = chainClassMatch ? scopeMethodsAsChain(chainClassMatch[1], root) : [];
+  const classExtras     = chainClassMatch
+    ? classInstanceMembersAsChain(chainClassMatch[1], fileText, root)
+    : [];
 
-  // Merge scope methods with generic builder methods (scopes first, deduped)
-  const seenNames  = new Set(scopeExtras.map(m => m.name));
-  const chainPool  = [...scopeExtras, ...CHAIN_METHODS.filter(m => !seenNames.has(m.name))];
+  // Class-specific methods first, then generic builder methods (deduped)
+  const seenNames  = new Set(classExtras.map(m => m.name));
+  const chainPool  = [...classExtras, ...CHAIN_METHODS.filter(m => !seenNames.has(m.name))];
 
   // Case A: lone '-' after an expression end
   if (/[)\w\]]-$/.test(before))

@@ -47,7 +47,8 @@ function parseClassmap(root) {
   const lineRe = /['"]([^'"]+)['"]\s*=>\s*\$(\w+)\s*\.\s*['"]([^'"]+)['"]/g;
   let m;
   while ((m = lineRe.exec(content)) !== null) {
-    const fqn      = m[1];
+    // PHP single-quoted strings use \\ for a literal backslash; convert to \
+    const fqn      = m[1].replace(/\\\\/g, '\\');
     const varName  = m[2];   // 'baseDir' or 'vendorDir'
     const relPath  = m[3];   // e.g. '/app/Models/User.php'
 
@@ -292,6 +293,16 @@ function getShortNameIndex(root) {
 }
 
 /**
+ * Return all file paths from the Composer classmap.
+ * Used by the prefetcher to warm ALL installed vendor packages (Filament,
+ * Spatie, etc.) rather than a hard-coded list of directories.
+ */
+function getClassmapFiles(root) {
+  const classmap = parseClassmap(root);
+  return Array.from(classmap.values());
+}
+
+/**
  * Return all vendor classes whose short name starts with `prefix`.
  * Results are lightweight { className, fqn, kind } objects — no file I/O.
  * `kind` is filled from vendorClassCache if the entry has already been
@@ -339,4 +350,4 @@ function invalidateClassmap() {
   classmapCache.clear();
 }
 
-module.exports = { getVendorClass, searchVendorByPrefix, warmVendorCache, invalidateClassmap };
+module.exports = { getVendorClass, searchVendorByPrefix, warmVendorCache, invalidateClassmap, getClassmapFiles };

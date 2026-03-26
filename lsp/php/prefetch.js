@@ -1,20 +1,6 @@
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
-const { warmVendorCache } = require('./vendor');
-
-// ── File collector ────────────────────────────────────────────────────────────
-
-function collectPhpFiles(dir, out) {
-  try {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) collectPhpFiles(full, out);
-      else if (e.name.endsWith('.php')) out.push(full);
-    }
-  } catch (_) {}
-}
+const { warmVendorCache, getClassmapFiles } = require('./vendor');
 
 // ── Background batch processor ────────────────────────────────────────────────
 
@@ -42,26 +28,17 @@ function processBatches(files, i) {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /**
- * Kick off a background scan of known vendor namespaces.
- * Safe to call multiple times — collectPhpFiles is fast and warmVendorCache
- * skips already-cached entries, so duplicate scans are cheap.
+ * Kick off a background warm of ALL vendor packages registered in Composer's
+ * classmap (vendor/composer/autoload_classmap.php).  This covers Laravel,
+ * Filament, Spatie, and any other installed package automatically — no
+ * hard-coded directory paths needed.
  *
- * Currently scans:
- *   vendor/laravel/framework/src/   — all Illuminate classes
- *
- * To add support for another package (e.g. Filament, Spatie) either call
- * prefetchVendorNamespaces again with a new root-relative path, or extend
- * VENDOR_PATHS below.
+ * Safe to call multiple times: warmVendorCache skips already-cached entries so
+ * redundant calls are cheap.  Batching via setImmediate keeps the event loop
+ * free for incoming LSP requests between batches.
  */
-const VENDOR_PATHS = [
-  path.join('vendor', 'laravel', 'framework', 'src'),
-];
-
 function prefetchVendorNamespaces(root) {
-  const files = [];
-  for (const rel of VENDOR_PATHS) {
-    collectPhpFiles(path.join(root, rel), files);
-  }
+  const files = getClassmapFiles(root);
   if (!files.length) return; // vendor/ not present (e.g. bare project)
   // Start after the current tick so the `initialized` response goes out first
   setImmediate(() => processBatches(files, 0));
