@@ -157,14 +157,140 @@ function isAlreadyImported(text, fqn) {
   return new RegExp(`^\\s*use\\s+${esc}(\\s+as\\s+|;)`, 'm').test(text);
 }
 
+// ─── Eloquent static method list ────────────────────────────────────────────
+const ELOQUENT_METHODS = [
+  { name: 'all',             snippet: 'all()' },
+  { name: 'get',             snippet: 'get()' },
+  { name: 'find',            snippet: 'find(${1:$id})' },
+  { name: 'findOrFail',      snippet: 'findOrFail(${1:$id})' },
+  { name: 'findMany',        snippet: 'findMany([${1:$ids}])' },
+  { name: 'first',           snippet: 'first()' },
+  { name: 'firstOrFail',     snippet: 'firstOrFail()' },
+  { name: 'firstOrCreate',   snippet: 'firstOrCreate([${1:}])' },
+  { name: 'firstOrNew',      snippet: 'firstOrNew([${1:}])' },
+  { name: 'create',          snippet: 'create([${1:}])' },
+  { name: 'forceCreate',     snippet: 'forceCreate([${1:}])' },
+  { name: 'updateOrCreate',  snippet: 'updateOrCreate([${1:}], [${2:}])' },
+  { name: 'destroy',         snippet: 'destroy(${1:$id})' },
+  { name: 'truncate',        snippet: 'truncate()' },
+  { name: 'query',           snippet: 'query()' },
+  { name: 'where',           snippet: "where('${1:column}', ${2:'value'})" },
+  { name: 'whereIn',         snippet: "whereIn('${1:column}', [${2:}])" },
+  { name: 'whereNotIn',      snippet: "whereNotIn('${1:column}', [${2:}])" },
+  { name: 'whereBetween',    snippet: "whereBetween('${1:column}', [${2:min}, ${3:max}])" },
+  { name: 'whereNull',       snippet: "whereNull('${1:column}')" },
+  { name: 'whereNotNull',    snippet: "whereNotNull('${1:column}')" },
+  { name: 'with',            snippet: "with('${1:relation}')" },
+  { name: 'withCount',       snippet: "withCount('${1:relation}')" },
+  { name: 'has',             snippet: "has('${1:relation}')" },
+  { name: 'doesntHave',      snippet: "doesntHave('${1:relation}')" },
+  { name: 'whereHas',        snippet: "whereHas('${1:relation}', function (\\$q) {\n    ${2:}\n})" },
+  { name: 'orderBy',         snippet: "orderBy('${1:column}', '${2:asc}')" },
+  { name: 'orderByDesc',     snippet: "orderByDesc('${1:column}')" },
+  { name: 'latest',          snippet: 'latest()' },
+  { name: 'oldest',          snippet: 'oldest()' },
+  { name: 'paginate',        snippet: 'paginate(${1:15})' },
+  { name: 'simplePaginate',  snippet: 'simplePaginate(${1:15})' },
+  { name: 'cursorPaginate',  snippet: 'cursorPaginate(${1:15})' },
+  { name: 'pluck',           snippet: "pluck('${1:column}')" },
+  { name: 'value',           snippet: "value('${1:column}')" },
+  { name: 'count',           snippet: 'count()' },
+  { name: 'sum',             snippet: "sum('${1:column}')" },
+  { name: 'avg',             snippet: "avg('${1:column}')" },
+  { name: 'max',             snippet: "max('${1:column}')" },
+  { name: 'min',             snippet: "min('${1:column}')" },
+  { name: 'exists',          snippet: 'exists()' },
+  { name: 'doesntExist',     snippet: 'doesntExist()' },
+  { name: 'select',          snippet: "select('${1:column}')" },
+  { name: 'distinct',        snippet: 'distinct()' },
+  { name: 'limit',           snippet: 'limit(${1:10})' },
+  { name: 'take',            snippet: 'take(${1:10})' },
+  { name: 'skip',            snippet: 'skip(${1:0})' },
+  { name: 'chunk',           snippet: 'chunk(${1:100}, function (\\$items) {\n    ${2:}\n})' },
+  { name: 'each',            snippet: 'each(function (\\$item) {\n    ${1:}\n})' },
+  { name: 'increment',       snippet: "increment('${1:column}')" },
+  { name: 'decrement',       snippet: "decrement('${1:column}')" },
+  { name: 'update',          snippet: 'update([${1:}])' },
+  { name: 'delete',          snippet: 'delete()' },
+  { name: 'forceDelete',     snippet: 'forceDelete()' },
+  { name: 'restore',         snippet: 'restore()' },
+  { name: 'withTrashed',     snippet: 'withTrashed()' },
+  { name: 'onlyTrashed',     snippet: 'onlyTrashed()' },
+];
+
+// Returns static method completions for ClassName:: context
+function getClassStaticCompletions(lineText, character, lineNum, root) {
+  const before = lineText.slice(0, character);
+  // Match ClassName:: with optional partial method name after
+  const match = before.match(/\b([A-Z][a-zA-Z0-9_]*)::[a-zA-Z_]*$/);
+  if (!match) return null;
+
+  const className = match[1];
+  const typedMethod = before.slice(before.lastIndexOf('::') + 2);
+  const methodStart = character - typedMethod.length;
+
+  const classes = discoverPhpClasses(root);
+  const classEntry = classes.find(c => c.className === className);
+  if (!classEntry) return null;
+
+  let methods = [];
+
+  let content;
+  try { content = fs.readFileSync(classEntry.file, 'utf8'); } catch (_) {}
+
+  if (content) {
+    // Include Eloquent methods if this class extends a Model base
+    if (/extends\s+(?:Model|Authenticatable|Pivot|MorphPivot)\b/.test(content)) {
+      methods = [...ELOQUENT_METHODS];
+    }
+
+    // Also include any explicitly declared public static methods
+    const staticRe = /public\s+static\s+function\s+(\w+)\s*\(([^)]*)\)/g;
+    let m;
+    while ((m = staticRe.exec(content)) !== null) {
+      const name = m[1];
+      if (!methods.find(em => em.name === name)) {
+        const params = m[2].trim();
+        methods.push({ name, snippet: params ? `${name}(\${1:})` : `${name}()` });
+      }
+    }
+  }
+
+  const filtered = methods.filter(
+    mt => typedMethod === '' || mt.name.toLowerCase().startsWith(typedMethod.toLowerCase())
+  );
+
+  return filtered.length > 0
+    ? filtered.map((mt, i) => ({
+        label: mt.name,
+        kind: 2, // Method
+        detail: `${className}::${mt.name}`,
+        insertTextFormat: 2,
+        sortText: i.toString().padStart(4, '0'),
+        textEdit: {
+          range: {
+            start: { line: lineNum, character: methodStart },
+            end:   { line: lineNum, character },
+          },
+          newText: mt.snippet,
+        },
+      }))
+    : null;
+}
+
 function getPhpClassCompletions(lineText, character, lineNum, fileText, root) {
   const before = lineText.slice(0, character);
-  // Only trigger on words starting with an uppercase letter
+  // Only trigger on words starting with an uppercase letter (not after ::)
+  if (/::/.test(before.match(/[A-Z][a-zA-Z0-9_]*[^]*$/)?.[0] || '')) return null;
   const wordMatch = before.match(/\b([A-Z][a-zA-Z0-9_]*)$/);
   if (!wordMatch) return null;
 
   const typed = wordMatch[1];
   const wordStart = character - typed.length;
+
+  // Detect `new ClassName` context — insert with ()
+  const isNewContext = /\bnew\s+$/.test(before.slice(0, wordStart));
+
   const classes = discoverPhpClasses(root);
   const insertLine = getUseInsertLine(fileText);
 
@@ -172,17 +298,19 @@ function getPhpClassCompletions(lineText, character, lineNum, fileText, root) {
     .filter(c => c.className.toLowerCase().startsWith(typed.toLowerCase()))
     .map((c, i) => {
       const alreadyImported = isAlreadyImported(fileText, c.fqn);
+      const insertText = isNewContext ? `${c.className}($1)` : c.className;
       const item = {
         label: c.className,
         kind: 7, // Class
         detail: c.fqn,
+        insertTextFormat: isNewContext ? 2 : 1,
         sortText: i.toString().padStart(4, '0'),
         textEdit: {
           range: {
             start: { line: lineNum, character: wordStart },
             end:   { line: lineNum, character },
           },
-          newText: c.className,
+          newText: insertText,
         },
       };
       if (!alreadyImported) {
@@ -450,7 +578,7 @@ function handleMessage(msg) {
             textDocumentSync: { openClose: true, change: 1 },
             definitionProvider: true,
             completionProvider: {
-              triggerCharacters: ['@', '$'],
+              triggerCharacters: ['@', '$', ':'],
               resolveProvider: false,
             },
           },
@@ -486,8 +614,15 @@ function handleMessage(msg) {
       const { line: lineNum, character } = params.position;
       const lineText = text.split('\n')[lineNum] || '';
 
-      // PHP class / model completions (non-blade PHP files only)
+      // PHP completions (non-blade PHP files only)
       if (isPhpFile(uri) && workspaceRoot) {
+        // :: static method completions take priority
+        const staticItems = getClassStaticCompletions(lineText, character, lineNum, workspaceRoot);
+        if (staticItems) {
+          send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: staticItems } });
+          break;
+        }
+        // Fall back to class name / import completions
         const items = getPhpClassCompletions(lineText, character, lineNum, text, workspaceRoot);
         send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: items || [] } });
         break;
