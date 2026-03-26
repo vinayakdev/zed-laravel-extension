@@ -35,8 +35,11 @@ function scopeCallParams(params) {
 /** Build opts object for resolveMembers */
 function makeOpts(root, fileText, context, callerVisibility) {
   return {
-    getAppClass:      (name) => discoverPhpClasses(root).find(c => c.className === name) || null,
-    getVendorClass:   (name, r) => getVendorClass(name, fileText, r),
+    getAppClass:    (name) => discoverPhpClasses(root).find(c => c.className === name) || null,
+    // altText is supplied by resolver.js when recursing into a vendor entry —
+    // it passes that entry's own fileContent so FQN lookups use the right
+    // use-statements instead of the original editing file.
+    getVendorClass: (name, r, altText) => getVendorClass(name, altText !== undefined ? altText : fileText, r),
     root,
     context,
     callerVisibility,

@@ -6,11 +6,12 @@
 const fs   = require('fs');
 const path = require('path');
 
-const { phpCompletions }  = require('./php/completions');
-const { phpDefinition }   = require('./php/definition');
-const { invalidateCache } = require('./php/discovery');
-const { bladeCompletions } = require('./blade/completions');
+const { phpCompletions }           = require('./php/completions');
+const { phpDefinition }            = require('./php/definition');
+const { invalidateCache }          = require('./php/discovery');
+const { bladeCompletions }         = require('./blade/completions');
 const { resolveViewPath, createBladeFile, findViewAtPosition } = require('./blade/views');
+const { prefetchVendorNamespaces } = require('./php/prefetch');
 
 // ── §1  Infrastructure ───────────────────────────────────────────────────────
 
@@ -91,7 +92,13 @@ function handleMessage(msg) {
       });
       break;
     }
-    case 'initialized': break;
+    case 'initialized':
+      // Kick off background prefetch of vendor/laravel/framework — fills the
+      // vendor class cache in 20-file batches between requests, so Illuminate
+      // traits (SoftDeletes, HasFactory, Notifiable …) are available without
+      // needing use-statement lookup after the first few seconds.
+      if (workspaceRoot) prefetchVendorNamespaces(workspaceRoot);
+      break;
     case 'shutdown':    send({ jsonrpc: '2.0', id, result: null }); break;
     case 'exit':        process.exit(0);
 

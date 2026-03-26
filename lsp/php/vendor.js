@@ -214,15 +214,16 @@ function parseVendorFile(filePath, expectedClassName) {
   }
 
   return {
-    className:  expectedClassName || className,
+    className:   expectedClassName || className,
     fqn,
-    file:       filePath,
-    line:       lineNum,
-    extends:    extendsName,
+    file:        filePath,
+    line:        lineNum,
+    extends:     extendsName,
     traits,
-    implements: implementsList,
+    implements:  implementsList,
     methods,
     properties,
+    fileContent: content, // kept so resolver can use it for deeper FQN lookups
   };
 }
 
@@ -237,13 +238,13 @@ function parseVendorFile(filePath, expectedClassName) {
  * @returns {object|null}     - Class entry or null if not found
  */
 function getVendorClass(className, fileText, root) {
-  // Return cached result if available
+  // Return cached result if available (populated by prior lookup or prefetch)
   if (vendorClassCache.has(className)) {
     return vendorClassCache.get(className);
   }
 
   // 1. Resolve FQN from use statements in the calling file
-  const fqn = fqnFromUseStatements(fileText, className);
+  const fqn = fqnFromUseStatements(fileText || '', className);
   if (!fqn) return null;
 
   // 2. Look up file path in the classmap
@@ -255,9 +256,24 @@ function getVendorClass(className, fileText, root) {
   const entry = parseVendorFile(filePath, className);
   if (!entry) return null;
 
-  // 4. Cache and return
+  // 4. Cache by short name and return
   vendorClassCache.set(className, entry);
   return entry;
+}
+
+/**
+ * Pre-populate the vendor class cache from a file path without needing
+ * a calling file's use-statements.  Called by the background prefetcher.
+ * Safe to call on any PHP file — silently skips unreadable / non-class files.
+ */
+function warmVendorCache(filePath) {
+  const entry = parseVendorFile(filePath, null);
+  if (!entry) return;
+  // Only cache if the short name isn't already present — first write wins
+  // (app classes take priority; prefetch order does not matter here)
+  if (!vendorClassCache.has(entry.className)) {
+    vendorClassCache.set(entry.className, entry);
+  }
 }
 
 /**
@@ -268,4 +284,4 @@ function invalidateClassmap() {
   classmapCache.clear();
 }
 
-module.exports = { getVendorClass, invalidateClassmap };
+module.exports = { getVendorClass, warmVendorCache, invalidateClassmap };

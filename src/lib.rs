@@ -11,6 +11,7 @@ const LSP_FILES: &[(&str, &str)] = &[
     ("php/resolver.js",      include_str!("../lsp/php/resolver.js")),
     ("php/vendor.js",        include_str!("../lsp/php/vendor.js")),
     ("php/inference.js",     include_str!("../lsp/php/inference.js")),
+    ("php/prefetch.js",      include_str!("../lsp/php/prefetch.js")),
     ("blade/data.js",        include_str!("../lsp/blade/data.js")),
     ("blade/views.js",       include_str!("../lsp/blade/views.js")),
     ("blade/completions.js", include_str!("../lsp/blade/completions.js")),

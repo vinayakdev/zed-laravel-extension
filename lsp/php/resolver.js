@@ -19,7 +19,7 @@ function mergeProps(existing, incoming) {
  *
  * opts = {
  *   getAppClass:      (name) => classEntry | null
- *   getVendorClass:   (name, root) => classEntry | null
+ *   getVendorClass:   (name, root, altFileText?) => classEntry | null
  *   root:             string
  *   context:          'instance' | 'static'
  *   callerVisibility: 'inside' | 'outside'
@@ -41,27 +41,36 @@ function resolveMembers(className, opts, depth = 0) {
     return { methods: [], properties: [] };
   }
 
+  // When recursing into this entry's traits/parent/interfaces, use the entry's
+  // own fileContent (if it's a vendor class) for FQN lookups.  This ensures
+  // that `use` statements from the vendor file itself are used — not the
+  // original editing file — when resolving deeper chains like
+  // SoftDeletes → SoftDeletingScope → Builder.
+  const childOpts = entry.fileContent
+    ? { ...opts, getVendorClass: (name, r) => opts.getVendorClass(name, r, entry.fileContent) }
+    : opts;
+
   // Own members — shallow copy so we never mutate the index entries
   let methods    = [...(entry.methods    || [])];
   let properties = [...(entry.properties || [])];
 
   // Traits use the same depth (copy-paste semantics)
   for (const trait of (entry.traits || [])) {
-    const merged = resolveMembers(trait, opts, depth);
+    const merged = resolveMembers(trait, childOpts, depth);
     methods    = mergeMethods(methods, merged.methods);
     properties = mergeProps(properties, merged.properties);
   }
 
   // Parent class increments depth
   if (entry.extends) {
-    const merged = resolveMembers(entry.extends, opts, depth + 1);
+    const merged = resolveMembers(entry.extends, childOpts, depth + 1);
     methods    = mergeMethods(methods, merged.methods);
     properties = mergeProps(properties, merged.properties);
   }
 
   // Interfaces increment depth (interfaces only contribute methods)
   for (const iface of (entry.implements || [])) {
-    const merged = resolveMembers(iface, opts, depth + 1);
+    const merged = resolveMembers(iface, childOpts, depth + 1);
     methods = mergeMethods(methods, merged.methods);
   }
 
