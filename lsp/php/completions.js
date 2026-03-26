@@ -277,13 +277,41 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
 
 // ── -> chain completions (generic, unknown type) ──────────────────────────────
 
-function chainCompletions(lineText, character, lineNum) {
+/**
+ * Returns scope methods for `className` as CHAIN_METHODS-shaped objects so
+ * they can be mixed into the chain dropdown alongside generic builder methods.
+ */
+function scopeMethodsAsChain(className, root) {
+  if (!root) return [];
+  const entry = discoverPhpClasses(root).find(c => c.className === className);
+  if (!entry) return [];
+  return (entry.methods || [])
+    .filter(m => m.isScope)
+    .map(m => {
+      const callParams = scopeCallParams(m.params);
+      return {
+        name:    m.scopeName,
+        snippet: callParams ? `${m.scopeName}($1)` : `${m.scopeName}()`,
+      };
+    });
+}
+
+function chainCompletions(lineText, character, lineNum, fileText, root) {
   const before   = lineText.slice(0, character);
   const nextChar = lineText[character] || '';
 
+  // Detect if we're chaining off a known class (e.g. User::popular()->)
+  // so we can surface that model's scope methods in the chain dropdown.
+  const chainClassMatch = before.match(/\b([A-Z][a-zA-Z0-9_]*)::/);
+  const scopeExtras     = chainClassMatch ? scopeMethodsAsChain(chainClassMatch[1], root) : [];
+
+  // Merge scope methods with generic builder methods (scopes first, deduped)
+  const seenNames  = new Set(scopeExtras.map(m => m.name));
+  const chainPool  = [...scopeExtras, ...CHAIN_METHODS.filter(m => !seenNames.has(m.name))];
+
   // Case A: lone '-' after an expression end
   if (/[)\w\]]-$/.test(before))
-    return methodItems(CHAIN_METHODS, '', lineNum, character - 1, character, '->', nextChar);
+    return methodItems(chainPool, '', lineNum, character - 1, character, '->', nextChar);
 
   // Case B: '->' with optional partial method
   const arrowMatch = before.match(/->([a-zA-Z_]*)$/);
@@ -291,7 +319,7 @@ function chainCompletions(lineText, character, lineNum) {
 
   const typed      = arrowMatch[1];
   const arrowStart = character - 2 - typed.length;
-  return methodItems(CHAIN_METHODS, typed, lineNum, arrowStart, character, '->', nextChar);
+  return methodItems(chainPool, typed, lineNum, arrowStart, character, '->', nextChar);
 }
 
 // ── Class name + auto-import completions ─────────────────────────────────────
@@ -383,7 +411,7 @@ function phpCompletions(lineText, character, lineNum, fileText, root) {
   if (statics)   return { isIncomplete: true, items: statics };
 
   // -> — generic chain completions when type is unknown
-  const chain = chainCompletions(lineText, character, lineNum);
+  const chain = chainCompletions(lineText, character, lineNum, fileText, root);
   if (chain)    return { isIncomplete: true, items: chain };
 
   // ClassName — class import completions

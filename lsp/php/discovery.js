@@ -83,14 +83,55 @@ function parseTraits(classBody) {
 }
 
 /**
+ * Extract the raw parameter string for a method whose opening `(` is at
+ * `openParenIdx` inside `classBody`.  Uses a brace-depth counter so nested
+ * parentheses in default values (e.g. `$x = foo()`) are handled correctly.
+ */
+function extractMethodParams(classBody, openParenIdx) {
+  let depth = 0;
+  const start = openParenIdx + 1;
+  for (let i = openParenIdx; i < classBody.length; i++) {
+    if      (classBody[i] === '(') depth++;
+    else if (classBody[i] === ')') {
+      depth--;
+      if (depth === 0) return classBody.slice(start, i).trim();
+    }
+  }
+  return classBody.slice(start).trim(); // unclosed paren — return remainder
+}
+
+/**
+ * Scan backward from `matchIndex` through blank lines, single-line comments,
+ * PHPDoc lines, and other PHP attributes to look for `#[Scope]`.
+ * Returns true if found, false if a "real" non-attribute line is hit first.
+ */
+function hasAttributeScope(classBody, matchIndex) {
+  const lines = classBody.slice(0, matchIndex).split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t === '')                                           continue; // blank
+    if (t.startsWith('//'))                                continue; // inline comment
+    if (t.startsWith('*') || t.startsWith('/*') || t.endsWith('*/')) continue; // PHPDoc
+    if (/^#\[Scope(\([^)]*\))?\]/.test(t))               return true; // #[Scope] or #[Scope(...)]
+    if (t.startsWith('#['))                                continue; // other attribute
+    break; // hit a real line of code — stop
+  }
+  return false;
+}
+
+/**
  * Parse methods declared inside a class body.
  * Detects local scope methods in two styles:
- *   - New: `#[Scope]` PHP attribute on the line immediately before the method
+ *   - New: `#[Scope]` PHP attribute anywhere in the preceding annotation block
  *   - Old: method name prefixed with `scope` + uppercase letter (e.g. `scopePopular`)
  * Scope methods are marked `isScope: true` with a `scopeName` (the caller-facing name).
+ *
+ * Params are extracted with a balanced-paren scanner so nested parens in
+ * default values (e.g. `$type = strtolower(foo())`) don't truncate early.
  */
 function parseMethods(classBody) {
-  const methodRe = /^\s*(public|protected|private)?\s*(static\s+)?(?:abstract\s+|final\s+)?function\s+(\w+)\s*\(([^)]*)\)/gm;
+  // Match up to and including the opening '(' — params extracted separately
+  const methodRe = /^\s*(public|protected|private)?\s*(static\s+)?(?:abstract\s+|final\s+)?function\s+(\w+)\s*\(/gm;
   const methods = [];
   let m;
   while ((m = methodRe.exec(classBody)) !== null) {
@@ -98,18 +139,19 @@ function parseMethods(classBody) {
     const visibility = m[1] || 'public';
     const isStatic   = !!m[2];
 
-    // Check for #[Scope] attribute on the immediately preceding non-blank line
-    const before    = classBody.slice(0, m.index);
-    const prevLines = before.trimEnd().split('\n');
-    const prevLine  = prevLines[prevLines.length - 1] || '';
-    const hasAttrScope = /^\s*#\[Scope\]/.test(prevLine);
+    // Opening '(' is the last character of the match
+    const openParenIdx = m.index + m[0].length - 1;
+    const params       = extractMethodParams(classBody, openParenIdx);
 
-    // Check for old-style scopeXxx naming convention
+    // Detect #[Scope] anywhere in the preceding annotation block
+    const scopeAttr = hasAttributeScope(classBody, m.index);
+
+    // Detect old-style scopeXxx naming convention
     const oldScopeMatch = name.match(/^scope([A-Z]\w*)$/);
 
     let isScope   = false;
     let scopeName = null;
-    if (hasAttrScope) {
+    if (scopeAttr) {
       isScope   = true;
       scopeName = name; // attribute style: method name IS the scope name
     } else if (oldScopeMatch) {
@@ -118,7 +160,7 @@ function parseMethods(classBody) {
       scopeName = oldScopeMatch[1].charAt(0).toLowerCase() + oldScopeMatch[1].slice(1);
     }
 
-    methods.push({ name, params: m[4].trim(), isStatic, visibility, isScope, scopeName });
+    methods.push({ name, params, isStatic, visibility, isScope, scopeName });
   }
   return methods;
 }

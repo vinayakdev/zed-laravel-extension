@@ -130,14 +130,28 @@ function parseTraits(classBody) {
   return traits;
 }
 
+function extractMethodParams(classBody, openParenIdx) {
+  let depth = 0;
+  const start = openParenIdx + 1;
+  for (let i = openParenIdx; i < classBody.length; i++) {
+    if      (classBody[i] === '(') depth++;
+    else if (classBody[i] === ')') {
+      depth--;
+      if (depth === 0) return classBody.slice(start, i).trim();
+    }
+  }
+  return classBody.slice(start).trim();
+}
+
 function parseMethods(classBody) {
-  const methodRe = /^\s*(public|protected|private)?\s*(static\s+)?(?:abstract\s+|final\s+)?function\s+(\w+)\s*\(([^)]*)\)/gm;
+  const methodRe = /^\s*(public|protected|private)?\s*(static\s+)?(?:abstract\s+|final\s+)?function\s+(\w+)\s*\(/gm;
   const methods = [];
   let m;
   while ((m = methodRe.exec(classBody)) !== null) {
+    const openParenIdx = m.index + m[0].length - 1;
     methods.push({
       name:       m[3],
-      params:     m[4].trim(),
+      params:     extractMethodParams(classBody, openParenIdx),
       isStatic:   !!m[2],
       visibility: m[1] || 'public',
     });
