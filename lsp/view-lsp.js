@@ -218,6 +218,125 @@ const ELOQUENT_METHODS = [
   { name: 'onlyTrashed',     snippet: 'onlyTrashed()' },
 ];
 
+// ─── Query builder / Eloquent chain methods (used after ->) ─────────────────
+const CHAIN_METHODS = [
+  // Terminal — return results
+  { name: 'get',             snippet: 'get()' },
+  { name: 'first',           snippet: 'first()' },
+  { name: 'firstOrFail',     snippet: 'firstOrFail()' },
+  { name: 'firstOrCreate',   snippet: 'firstOrCreate([${1:}])' },
+  { name: 'firstOrNew',      snippet: 'firstOrNew([${1:}])' },
+  { name: 'find',            snippet: 'find(${1:$id})' },
+  { name: 'findOrFail',      snippet: 'findOrFail(${1:$id})' },
+  { name: 'all',             snippet: 'all()' },
+  { name: 'count',           snippet: 'count()' },
+  { name: 'exists',          snippet: 'exists()' },
+  { name: 'doesntExist',     snippet: 'doesntExist()' },
+  { name: 'paginate',        snippet: 'paginate(${1:15})' },
+  { name: 'simplePaginate',  snippet: 'simplePaginate(${1:15})' },
+  { name: 'cursorPaginate',  snippet: 'cursorPaginate(${1:15})' },
+  { name: 'pluck',           snippet: "pluck('${1:column}')" },
+  { name: 'value',           snippet: "value('${1:column}')" },
+  { name: 'sum',             snippet: "sum('${1:column}')" },
+  { name: 'avg',             snippet: "avg('${1:column}')" },
+  { name: 'max',             snippet: "max('${1:column}')" },
+  { name: 'min',             snippet: "min('${1:column}')" },
+  { name: 'chunk',           snippet: 'chunk(${1:100}, function (\\$items) {\n    ${2:}\n})' },
+  { name: 'each',            snippet: 'each(function (\\$item) {\n    ${1:}\n})' },
+  { name: 'toArray',         snippet: 'toArray()' },
+  { name: 'toJson',          snippet: 'toJson()' },
+  // Constraints — keep building the query
+  { name: 'where',           snippet: "where('${1:column}', ${2:'value'})" },
+  { name: 'orWhere',         snippet: "orWhere('${1:column}', ${2:'value'})" },
+  { name: 'whereIn',         snippet: "whereIn('${1:column}', [${2:}])" },
+  { name: 'whereNotIn',      snippet: "whereNotIn('${1:column}', [${2:}])" },
+  { name: 'whereBetween',    snippet: "whereBetween('${1:column}', [${2:min}, ${3:max}])" },
+  { name: 'whereNull',       snippet: "whereNull('${1:column}')" },
+  { name: 'whereNotNull',    snippet: "whereNotNull('${1:column}')" },
+  { name: 'whereHas',        snippet: "whereHas('${1:relation}', function (\\$q) {\n    ${2:}\n})" },
+  { name: 'has',             snippet: "has('${1:relation}')" },
+  { name: 'doesntHave',      snippet: "doesntHave('${1:relation}')" },
+  { name: 'with',            snippet: "with('${1:relation}')" },
+  { name: 'withCount',       snippet: "withCount('${1:relation}')" },
+  { name: 'without',         snippet: "without('${1:relation}')" },
+  { name: 'select',          snippet: "select('${1:column}')" },
+  { name: 'addSelect',       snippet: "addSelect('${1:column}')" },
+  { name: 'distinct',        snippet: 'distinct()' },
+  { name: 'orderBy',         snippet: "orderBy('${1:column}', '${2:asc}')" },
+  { name: 'orderByDesc',     snippet: "orderByDesc('${1:column}')" },
+  { name: 'latest',          snippet: "latest()" },
+  { name: 'oldest',          snippet: "oldest()" },
+  { name: 'limit',           snippet: 'limit(${1:10})' },
+  { name: 'take',            snippet: 'take(${1:10})' },
+  { name: 'skip',            snippet: 'skip(${1:0})' },
+  { name: 'offset',          snippet: 'offset(${1:0})' },
+  { name: 'groupBy',         snippet: "groupBy('${1:column}')" },
+  { name: 'having',          snippet: "having('${1:column}', '${2:>=}', ${3:value})" },
+  // Writes
+  { name: 'update',          snippet: 'update([${1:}])' },
+  { name: 'delete',          snippet: 'delete()' },
+  { name: 'forceDelete',     snippet: 'forceDelete()' },
+  { name: 'restore',         snippet: 'restore()' },
+  { name: 'increment',       snippet: "increment('${1:column}')" },
+  { name: 'decrement',       snippet: "decrement('${1:column}')" },
+  // Soft deletes
+  { name: 'withTrashed',     snippet: 'withTrashed()' },
+  { name: 'onlyTrashed',     snippet: 'onlyTrashed()' },
+  // Instance methods (on a retrieved model)
+  { name: 'save',            snippet: 'save()' },
+  { name: 'fresh',           snippet: 'fresh()' },
+  { name: 'refresh',         snippet: 'refresh()' },
+  { name: 'touch',           snippet: 'touch()' },
+  { name: 'fill',            snippet: 'fill([${1:}])' },
+  // Debug
+  { name: 'dd',              snippet: 'dd()' },
+  { name: 'dump',            snippet: 'dump()' },
+];
+
+function getChainCompletions(lineText, character, lineNum) {
+  const before = lineText.slice(0, character);
+
+  // Case A: user just typed '-' after a closing paren, word, or bracket
+  if (/[)\w\]]-$/.test(before)) {
+    const start = character - 1; // replace the lone '-'
+    return CHAIN_METHODS.map((m, i) => ({
+      label: m.name,
+      kind: 2, // Method
+      detail: `→ ${m.name}`,
+      insertTextFormat: 2,
+      sortText: i.toString().padStart(4, '0'),
+      textEdit: {
+        range: { start: { line: lineNum, character: start }, end: { line: lineNum, character } },
+        newText: `->${m.snippet}`,
+      },
+    }));
+  }
+
+  // Case B: '->' already present, with optional partial method typed
+  const arrowMatch = before.match(/->([a-zA-Z_]*)$/);
+  if (!arrowMatch) return null;
+
+  const typedMethod = arrowMatch[1];
+  const arrowStart = character - 2 - typedMethod.length; // position of '-'
+  const filtered = typedMethod
+    ? CHAIN_METHODS.filter(m => m.name.toLowerCase().startsWith(typedMethod.toLowerCase()))
+    : CHAIN_METHODS;
+
+  return filtered.length > 0
+    ? filtered.map((m, i) => ({
+        label: m.name,
+        kind: 2,
+        detail: `→ ${m.name}`,
+        insertTextFormat: 2,
+        sortText: i.toString().padStart(4, '0'),
+        textEdit: {
+          range: { start: { line: lineNum, character: arrowStart }, end: { line: lineNum, character } },
+          newText: `->${m.snippet}`,
+        },
+      }))
+    : null;
+}
+
 // Returns static method completions for ClassName:: context
 function getClassStaticCompletions(lineText, character, lineNum, root) {
   const before = lineText.slice(0, character);
@@ -578,7 +697,7 @@ function handleMessage(msg) {
             textDocumentSync: { openClose: true, change: 1 },
             definitionProvider: true,
             completionProvider: {
-              triggerCharacters: ['@', '$', ':'],
+              triggerCharacters: ['@', '$', ':', '-', '>'],
               resolveProvider: false,
             },
           },
@@ -616,13 +735,19 @@ function handleMessage(msg) {
 
       // PHP completions (non-blade PHP files only)
       if (isPhpFile(uri) && workspaceRoot) {
-        // :: static method completions take priority
-        const staticItems = getClassStaticCompletions(lineText, character, lineNum, workspaceRoot);
-        if (staticItems) {
-          send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: staticItems } });
+        // 1. -> chain completions (highest priority — triggered by - or >)
+        const chainItems = getChainCompletions(lineText, character, lineNum);
+        if (chainItems) {
+          send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items: chainItems } });
           break;
         }
-        // Fall back to class name / import completions
+        // 2. ClassName:: static method completions
+        const staticItems = getClassStaticCompletions(lineText, character, lineNum, workspaceRoot);
+        if (staticItems) {
+          send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items: staticItems } });
+          break;
+        }
+        // 3. Class name import completions
         const items = getPhpClassCompletions(lineText, character, lineNum, text, workspaceRoot);
         send({ jsonrpc: '2.0', id, result: { isIncomplete: false, items: items || [] } });
         break;
