@@ -411,6 +411,16 @@ function classImportCompletions(lineText, character, lineNum, fileText, root) {
     ...vendorMatches,
   ];
 
+  // Sort by relevance: exact match first, then shorter names, then alphabetical
+  const lc = typed.toLowerCase();
+  allEntries.sort((a, b) => {
+    const aExact = a.className.toLowerCase() === lc ? 0 : 1;
+    const bExact = b.className.toLowerCase() === lc ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    if (a.className.length !== b.className.length) return a.className.length - b.className.length;
+    return a.className.localeCompare(b.className);
+  });
+
   const items = allEntries.map((entry, i) => buildImportItem(entry, i, ctx));
   return items.length ? items : null;
 }
