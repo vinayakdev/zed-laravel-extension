@@ -1,10 +1,11 @@
 'use strict';
 // Fetches routes from `php artisan route:list --json`.
-// Runs asynchronously so the LSP never blocks; returns cached results immediately.
+// First call is synchronous (spawnSync) so completions have full data immediately.
+// Subsequent refreshes are async (exec) to avoid blocking the LSP.
 //
 // RouteEntry shape matches routes.js: { name, verb, uri, action }
 
-const { exec } = require('child_process');
+const { exec, spawnSync } = require('child_process');
 const path = require('path');
 const fs   = require('fs');
 
@@ -12,12 +13,14 @@ const fs   = require('fs');
 
 let cache = null; // { root: string, routes: RouteEntry[], ts: number }
 let pending = false;
+let initialSyncDone = false; // true once the first synchronous load has run
 
 const CACHE_TTL_MS = 30_000; // re-run artisan at most every 30 s
 
 function invalidateArtisanRouteCache() {
-    cache   = null;
-    pending = false;
+    cache          = null;
+    pending        = false;
+    initialSyncDone = false;
 }
 
 // ── Normalise artisan JSON → RouteEntry[] ─────────────────────────────────────
@@ -65,6 +68,52 @@ function artisanPath(rootPath) {
     return fs.existsSync(p) ? p : null;
 }
 
+function makeEnv() {
+    const extraPath = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'].join(':');
+    return { ...process.env, PATH: `${extraPath}:${process.env.PATH || ''}` };
+}
+
+function parseRouteJson(stdout) {
+    const start = stdout.indexOf('[');
+    if (start === -1) return null;
+    try { return JSON.parse(stdout.slice(start)); } catch (_) { return null; }
+}
+
+/**
+ * Synchronous initial load — blocks until artisan finishes.
+ * Called once per root so the very first completion request has full route data.
+ * Subsequent refreshes use the async path to avoid blocking the LSP.
+ */
+function loadArtisanRoutesSync(rootPath) {
+    if (!artisanPath(rootPath)) return;
+
+    const php = process.env.PHP_BINARY || 'php';
+    const result = spawnSync(
+        php,
+        ['artisan', 'route:list', '--json', '--no-ansi'],
+        { cwd: rootPath, env: makeEnv(), timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }
+    );
+
+    initialSyncDone = true;
+
+    if (result.error || result.status !== 0) {
+        process.stderr.write(
+            `[laravel-lsp] artisan route:list (sync) failed: ${(result.stderr || result.error?.message || '').slice(0, 300)}\n`
+        );
+        return;
+    }
+
+    const rows = parseRouteJson(result.stdout || '');
+    if (!rows) {
+        process.stderr.write('[laravel-lsp] artisan route:list (sync): no JSON array in output\n');
+        return;
+    }
+
+    const routes = normalise(rows);
+    process.stderr.write(`[laravel-lsp] artisan route:list (sync): loaded ${routes.length} named routes\n`);
+    cache = { root: rootPath, routes, ts: Date.now() };
+}
+
 /**
  * Fire-and-forget: run artisan via the shell and update the cache when done.
  * Using exec (shell=true) so the shell's PATH is used — important because the
@@ -78,25 +127,11 @@ function refreshArtisanRoutes(rootPath) {
 
     pending = true;
 
-    // PHP_BINARY env var lets users point at a specific binary (e.g. php8.3).
     const php = process.env.PHP_BINARY || 'php';
-
-    // Common Homebrew / system PHP locations to prepend to PATH so the shell
-    // can find `php` even when the editor's GUI PATH is minimal.
-    const extraPath = [
-        '/opt/homebrew/bin',
-        '/usr/local/bin',
-        '/usr/bin',
-    ].join(':');
-
-    const env = {
-        ...process.env,
-        PATH: `${extraPath}:${process.env.PATH || ''}`,
-    };
 
     exec(
         `${php} artisan route:list --json --no-ansi`,
-        { cwd: rootPath, env, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
+        { cwd: rootPath, env: makeEnv(), timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
         (err, stdout, stderr) => {
             pending = false;
 
@@ -108,17 +143,9 @@ function refreshArtisanRoutes(rootPath) {
                 return;
             }
 
-            let rows;
-            try {
-                // Trim any leading non-JSON output (deprecation notices, etc.)
-                const start = stdout.indexOf('[');
-                if (start === -1) {
-                    process.stderr.write('[laravel-lsp] artisan route:list: no JSON array in output\n');
-                    return;
-                }
-                rows = JSON.parse(stdout.slice(start));
-            } catch (parseErr) {
-                process.stderr.write(`[laravel-lsp] artisan route:list JSON parse error: ${parseErr.message}\n`);
+            const rows = parseRouteJson(stdout || '');
+            if (!rows) {
+                process.stderr.write('[laravel-lsp] artisan route:list: no JSON array in output\n');
                 return;
             }
 
@@ -132,18 +159,30 @@ function refreshArtisanRoutes(rootPath) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Return the most recently fetched artisan routes for rootPath.
- * Also schedules a background refresh when the cache is missing or stale.
+ * Return routes for rootPath, covering ALL routes including those registered
+ * in service providers, packages, and any file outside routes/.
+ *
+ * First call per root is synchronous (blocks until artisan finishes) so the
+ * very first completion has complete data. After that, stale refreshes run
+ * asynchronously in the background.
  *
  * @param {string} rootPath
  * @returns {RouteEntry[]}
  */
 function getArtisanRoutes(rootPath) {
+    // First ever call for this root — load synchronously so completions are
+    // immediately complete (covers service-provider routes, package routes, etc.)
+    if (!initialSyncDone || !cache || cache.root !== rootPath) {
+        loadArtisanRoutesSync(rootPath);
+    }
+
+    // Cache is now populated (or artisan failed and we have nothing).
+    // Schedule an async background refresh if the data is getting stale.
     const stale = !cache
         || cache.root !== rootPath
         || (Date.now() - cache.ts) > CACHE_TTL_MS;
 
-    if (stale) refreshArtisanRoutes(rootPath);
+    if (stale && !pending) refreshArtisanRoutes(rootPath);
 
     return (cache && cache.root === rootPath) ? cache.routes : [];
 }
