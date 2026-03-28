@@ -1,0 +1,12 @@
+{
+  "name": "zed-laravel-lsp",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "npx esbuild scripts/bundle-parser.js --bundle --platform=node --format=cjs --log-level=warning --outfile=lsp/vendor/php-parser.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0",
+    "php-parser": "^3.2.0"
+  }
+}

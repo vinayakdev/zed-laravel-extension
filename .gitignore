@@ -19,3 +19,7 @@ Cargo.lock
 
 # Temp
 *.tmp
+
+# Node
+node_modules/
+lsp/vendor/

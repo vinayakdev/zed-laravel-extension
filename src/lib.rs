@@ -3,18 +3,22 @@ use zed_extension_api::{self as zed, LanguageServerId, Result};
 // Each module file is embedded at compile time and written to disk at runtime.
 // Adding a new module = add an include_str! here + one entry in LSP_FILES below.
 const LSP_FILES: &[(&str, &str)] = &[
-    ("server.js",            include_str!("../lsp/server.js")),
-    ("php/data.js",          include_str!("../lsp/php/data.js")),
-    ("php/discovery.js",     include_str!("../lsp/php/discovery.js")),
-    ("php/completions.js",   include_str!("../lsp/php/completions.js")),
-    ("php/definition.js",    include_str!("../lsp/php/definition.js")),
-    ("php/resolver.js",      include_str!("../lsp/php/resolver.js")),
-    ("php/vendor.js",        include_str!("../lsp/php/vendor.js")),
-    ("php/inference.js",     include_str!("../lsp/php/inference.js")),
-    ("blade/data.js",        include_str!("../lsp/blade/data.js")),
-    ("blade/views.js",       include_str!("../lsp/blade/views.js")),
-    ("blade/components.js",  include_str!("../lsp/blade/components.js")),
-    ("blade/completions.js", include_str!("../lsp/blade/completions.js")),
+    ("server.js",                include_str!("../lsp/server.js")),
+    ("php/data.js",              include_str!("../lsp/php/data.js")),
+    ("php/discovery.js",         include_str!("../lsp/php/discovery.js")),
+    ("php/completions.js",       include_str!("../lsp/php/completions.js")),
+    ("php/definition.js",        include_str!("../lsp/php/definition.js")),
+    ("php/resolver.js",          include_str!("../lsp/php/resolver.js")),
+    ("php/vendor.js",            include_str!("../lsp/php/vendor.js")),
+    ("php/inference.js",         include_str!("../lsp/php/inference.js")),
+    ("php/routes.js",            include_str!("../lsp/php/routes.js")),
+    ("php/config.js",            include_str!("../lsp/php/config.js")),
+    ("php/env.js",               include_str!("../lsp/php/env.js")),
+    ("vendor/php-parser.js",     include_str!("../lsp/vendor/php-parser.js")),
+    ("blade/data.js",            include_str!("../lsp/blade/data.js")),
+    ("blade/views.js",           include_str!("../lsp/blade/views.js")),
+    ("blade/components.js",      include_str!("../lsp/blade/components.js")),
+    ("blade/completions.js",     include_str!("../lsp/blade/completions.js")),
 ];
 
 struct LaravelExtension {

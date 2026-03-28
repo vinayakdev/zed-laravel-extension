@@ -12,6 +12,9 @@ const { invalidateCache } = require('./php/discovery');
 const { bladeCompletions } = require('./blade/completions');
 const { resolveViewPath, createBladeFile, findViewAtPosition } = require('./blade/views');
 const { discoverComponents, invalidateComponentCache, componentTagToFiles } = require('./blade/components');
+const { getRoutes, invalidateRouteCache, invalidateAllRouteCaches, refreshArtisanRoutes } = require('./php/routes');
+const { getConfigEntries, invalidateConfigCache } = require('./php/config');
+const { parseEnvFile } = require('./php/env');
 
 // ── §1  Infrastructure ───────────────────────────────────────────────────────
 
@@ -65,6 +68,47 @@ function handleCreateResponse(id, result) {
          params: { type: 3, message: `Created: resources/views/${viewName.replace(/\./g, '/')}.blade.php` } });
 }
 
+// ── Component file creation ───────────────────────────────────────────────────
+
+/**
+ * Create an anonymous Blade component at the conventional path.
+ * tagName: dot-notated (e.g. "alert", "forms.input")
+ * Creates resources/views/components/<tagName as path>.blade.php with a
+ * basic @props + $slot template, then opens the file in the editor.
+ */
+function createComponent(tagName, rootPath) {
+  const relPath  = tagName.replace(/\./g, path.sep);
+  const filePath = path.join(rootPath, 'resources', 'views', 'components', relPath + '.blade.php');
+  const dir      = path.dirname(filePath);
+  const relDisplay = 'resources/views/components/' + tagName.replace(/\./g, '/') + '.blade.php';
+
+  if (fs.existsSync(filePath)) {
+    send({ jsonrpc: '2.0', method: 'window/showMessage',
+           params: { type: 2, message: `Component already exists: ${relDisplay}` } });
+    // Still open it so the user can see it
+    send({ jsonrpc: '2.0', id: nextRequestId++, method: 'window/showDocument',
+           params: { uri: pathToUri(filePath), takeFocus: false } });
+    return;
+  }
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    // Basic anonymous component: empty div, no props or slots
+    const template = '<div>\n\n</div>\n';
+    fs.writeFileSync(filePath, template, 'utf8');
+
+    invalidateComponentCache();
+
+    send({ jsonrpc: '2.0', id: nextRequestId++, method: 'window/showDocument',
+           params: { uri: pathToUri(filePath), takeFocus: false } });
+    send({ jsonrpc: '2.0', method: 'window/showMessage',
+           params: { type: 3, message: `Created: ${relDisplay}` } });
+  } catch (e) {
+    send({ jsonrpc: '2.0', method: 'window/showMessage',
+           params: { type: 1, message: `Failed to create component: ${e.message}` } });
+  }
+}
+
 // ── x-component tag position helper ─────────────────────────────────────────
 
 /**
@@ -89,6 +133,93 @@ function findXTagAtPosition(text, line, character) {
   return null;
 }
 
+// ── §6  route() / config() completion helpers ────────────────────────────────
+
+/**
+ * Detect if the cursor is inside route('...') or config('...').
+ * Returns { type: 'route'|'config', typed: string } or null.
+ *
+ * Matches both single and double quoted strings, and handles the cursor
+ * sitting anywhere inside the argument (including empty: route('|')).
+ */
+function detectLaravelStringContext(lineText, character) {
+    const prefix = lineText.slice(0, character);
+    let m;
+
+    m = prefix.match(/\broute\(\s*["']([^"']*)$/);
+    if (m) return { type: 'route',  typed: m[1] };
+
+    m = prefix.match(/\bconfig\(\s*["']([^"']*)$/);
+    if (m) return { type: 'config', typed: m[1] };
+
+    return null;
+}
+
+/** Build LSP completion items for named routes. */
+function routeCompletionItems(rootPath, typed, lineNum, character) {
+    const routes = getRoutes(rootPath);
+    // Replace range: start of the typed prefix up to the current cursor
+    const replaceStart = character - typed.length;
+    return routes
+        .filter(r => r.name.startsWith(typed))
+        .map(r => {
+            const docs = r.action ? `**Action:** ${r.action}` : '';
+            return {
+                label:         r.name,
+                kind:          12,          // Value
+                detail:        `${r.verb} ${r.uri}`,
+                documentation: docs ? { kind: 'markdown', value: docs } : undefined,
+                // textEdit replaces exactly the typed prefix so no duplication on commit
+                textEdit: {
+                    range: { start: { line: lineNum, character: replaceStart },
+                             end:   { line: lineNum, character } },
+                    newText: r.name,
+                },
+                filterText: r.name,
+                sortText:   '\x00' + r.name,
+            };
+        });
+}
+
+/** Build LSP completion items for config keys, showing current/default values. */
+function configCompletionItems(rootPath, typed, lineNum, character) {
+    const entries     = getConfigEntries(rootPath);
+    const envValues   = parseEnvFile(rootPath);
+    const replaceStart = character - typed.length;
+
+    return entries
+        .filter(e => e.key.startsWith(typed))
+        .map(e => {
+            let detail  = '';
+            let mdLines = [];
+
+            if (e.envKey) {
+                const live = envValues[e.envKey];
+                detail = live !== undefined ? `${e.envKey} = "${live}"` : `env('${e.envKey}')`;
+                mdLines.push(`**Env key:** \`${e.envKey}\``);
+                if (e.default !== null)      mdLines.push(`**Default:** ${e.default}`);
+                if (live !== undefined)      mdLines.push(`**Current (.env):** \`${live}\``);
+            } else if (e.literal !== null) {
+                detail = e.literal;
+                mdLines.push(`**Value:** ${e.literal}`);
+            }
+
+            return {
+                label:         e.key,
+                kind:          12,          // Value
+                detail,
+                documentation: mdLines.length ? { kind: 'markdown', value: mdLines.join('\n\n') } : undefined,
+                textEdit: {
+                    range: { start: { line: lineNum, character: replaceStart },
+                             end:   { line: lineNum, character } },
+                    newText: e.key,
+                },
+                filterText: e.key,
+                sortText:   '\x00' + e.key,
+            };
+        });
+}
+
 // ── §7  Message handler ──────────────────────────────────────────────────────
 
 function handleMessage(msg) {
@@ -109,14 +240,19 @@ function handleMessage(msg) {
           capabilities: {
             textDocumentSync: { openClose: true, change: 1 },
             definitionProvider: true,
-            completionProvider: { triggerCharacters: ['@', '$', ':', '-', '>'], resolveProvider: false },
+            completionProvider: { triggerCharacters: ['@', '$', ':', '-', '>', "'", '"', '.'], resolveProvider: false },
+            executeCommandProvider: { commands: ['laravel.createComponent'] },
           },
           serverInfo: { name: 'laravel-view-lsp', version: '0.1.0' },
         },
       });
       break;
     }
-    case 'initialized': break;
+    case 'initialized':
+      // Kick off artisan route:list in the background so the first completion
+      // that references route() already has package/SP routes available.
+      if (workspaceRoot) refreshArtisanRoutes(workspaceRoot);
+      break;
     case 'shutdown':    send({ jsonrpc: '2.0', id, result: null }); break;
     case 'exit':        process.exit(0);
 
@@ -127,6 +263,8 @@ function handleMessage(msg) {
       if (isPhpFile(openUri)) invalidateCache();
       if (isPhpFile(openUri)   && openUri.includes('/app/View/Components/'))        invalidateComponentCache();
       if (isBladeFile(openUri) && openUri.includes('/resources/views/components/')) invalidateComponentCache();
+      if (isPhpFile(openUri)   && openUri.includes('/routes/'))  invalidateAllRouteCaches();
+      if (isPhpFile(openUri)   && openUri.includes('/config/'))  invalidateConfigCache();
       break;
     }
 
@@ -137,6 +275,8 @@ function handleMessage(msg) {
       if (isPhpFile(changeUri)) invalidateCache();
       if (isPhpFile(changeUri)   && changeUri.includes('/app/View/Components/'))        invalidateComponentCache();
       if (isBladeFile(changeUri) && changeUri.includes('/resources/views/components/')) invalidateComponentCache();
+      if (isPhpFile(changeUri)   && changeUri.includes('/routes/'))  invalidateAllRouteCaches();
+      if (isPhpFile(changeUri)   && changeUri.includes('/config/'))  invalidateConfigCache();
       break;
     }
 
@@ -152,6 +292,21 @@ function handleMessage(msg) {
       const lineText = text.split('\n')[lineNum] || '';
 
       let completionResult = { isIncomplete: false, items: [] };
+
+      // route('...') and config('...') work in both PHP and Blade files
+      if (workspaceRoot) {
+        const laravelCtx = detectLaravelStringContext(lineText, character);
+        if (laravelCtx) {
+          const items = laravelCtx.type === 'route'
+            ? routeCompletionItems(workspaceRoot, laravelCtx.typed, lineNum, character)
+            : configCompletionItems(workspaceRoot, laravelCtx.typed, lineNum, character);
+          // isIncomplete: true tells the editor to re-request on every keystroke
+          // so typing 'app.' keeps the list alive without needing it as a trigger char
+          send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items } });
+          break;
+        }
+      }
+
       if      (isPhpFile(uri)   && workspaceRoot) completionResult = phpCompletions(lineText, character, lineNum, text, workspaceRoot);
       else if (isBladeFile(uri))                  completionResult = bladeCompletions(lineText, character, lineNum, uri, workspaceRoot);
 
@@ -220,6 +375,17 @@ function handleMessage(msg) {
         break;
       }
 
+      send({ jsonrpc: '2.0', id, result: null });
+      break;
+    }
+
+    // Component scaffolding
+    case 'workspace/executeCommand': {
+      const { command, arguments: args = [] } = params;
+      if (command === 'laravel.createComponent') {
+        const [tagName, rootPath] = args;
+        if (tagName && rootPath) createComponent(tagName, rootPath);
+      }
       send({ jsonrpc: '2.0', id, result: null });
       break;
     }

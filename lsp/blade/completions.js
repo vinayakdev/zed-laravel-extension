@@ -7,6 +7,49 @@ const { discoverComponents } = require('./components');
 // ── x-component tag completions ──────────────────────────────────────────────
 
 /**
+ * Build the LSP snippet newText for a component tag.
+ * Starts with `x-` (the leading `<` is already in the document).
+ *
+ * - Required props → tab stops ${N:propname} in the opening tag
+ * - Has default/named slots → block form with cursor inside; otherwise self-closing
+ * - indent: leading whitespace of the current line (for closing tag alignment)
+ */
+function buildTagSnippet(c, indent, indentUnit) {
+  const required = c.props.filter(p => !p.hasDefault);
+
+  let stopIdx = 1;
+  const propParts = required.map(p => `${p.kebab}="\${${stopIdx++}:${p.kebab}}"`);
+  const propStr   = propParts.length ? ' ' + propParts.join(' ') : '';
+
+  const hasAnySlot = c.hasSlot || (c.namedSlots && c.namedSlots.length > 0);
+
+  if (hasAnySlot) {
+    const lines = [`x-${c.tagName}${propStr}>`];
+
+    if (c.namedSlots && c.namedSlots.length > 0) {
+      for (const slotName of c.namedSlots) {
+        lines.push(`${indent}${indentUnit}<x-slot:${slotName}>`);
+        lines.push(`${indent}${indentUnit}${indentUnit}\${${stopIdx++}}`);
+        lines.push(`${indent}${indentUnit}</x-slot:${slotName}>`);
+      }
+    }
+
+    if (c.hasSlot) {
+      lines.push(`${indent}${indentUnit}\${${stopIdx++}:content}`);
+    }
+
+    lines.push(`${indent}</x-${c.tagName}>`);
+    return lines.join('\n');
+  }
+
+  // Self-closing
+  if (propParts.length > 0) {
+    return `x-${c.tagName}${propStr} />`;
+  }
+  return `x-${c.tagName}\${1} />`;
+}
+
+/**
  * Triggered when the user types `<x-` (or continues typing after it).
  * Returns completion items for every discovered component whose tag starts with
  * the already-typed prefix.
@@ -16,6 +59,11 @@ function componentTagCompletions(lineText, character, lineNum, root) {
   const before = lineText.slice(0, character);
   const tagMatch = before.match(/<x-([\w.-]*)$/);
   if (!tagMatch) return null;
+
+  // Current line's leading whitespace — used to align closing tag in block form
+  const indent     = lineText.match(/^(\s*)/)[1];
+  // One indent unit: tab if the file uses tabs, otherwise 4 spaces
+  const indentUnit = indent.includes('\t') ? '\t' : '    ';
 
   const typed  = tagMatch[1].toLowerCase();
   // Replace range: from the `x` in `<x-` up to the end of the already-typed word
@@ -47,15 +95,31 @@ function componentTagCompletions(lineText, character, lineNum, root) {
   // tiebreak, pushing Emmet below all our results.
   const filterText = tagMatch[0].slice(1); // strips leading '<' → "x-la"
 
-  const items = components
-    .filter(c => tagMatches(c.tagName))
-    .map((c, i) => {
-      const label  = `x-${c.tagName}`;
-      const detail = c.isAnonymous
-        ? `(anonymous)${c.props.length ? ' — ' + c.props.map(p => p.kebab).join(', ') : ''}`
-        : `${c.className}${c.props.length ? ' — ' + c.props.map(p => p.kebab).join(', ') : ''}`;
+  const matched = components.filter(c => tagMatches(c.tagName));
 
-      return {
+  const items = matched.map((c, i) => {
+      const label = `x-${c.tagName}`;
+
+      // Props: required shown as `name*`, optional as `name?`
+      const reqProps = c.props.filter(p => !p.hasDefault);
+      const optProps = c.props.filter(p =>  p.hasDefault);
+      const propLabel = [
+        ...reqProps.map(p => p.kebab + '*'),
+        ...optProps.map(p => p.kebab + '?'),
+      ].join(', ');
+
+      // Slot info suffix
+      const slotParts = [];
+      if (c.namedSlots && c.namedSlots.length) c.namedSlots.forEach(s => slotParts.push(`slot:${s}`));
+      if (c.hasSlot) slotParts.push('$slot');
+      const slotSuffix = slotParts.length ? '  ·  ' + slotParts.join(', ') : '';
+
+      const typeLabel = c.isAnonymous ? '(anonymous)' : (c.className || c.tagName);
+      const detail    = propLabel
+        ? `${typeLabel} — ${propLabel}${slotSuffix}`
+        : `${typeLabel}${slotSuffix}`;
+
+      const item = {
         label,
         kind:             10, // Property
         detail,
@@ -67,10 +131,45 @@ function componentTagCompletions(lineText, character, lineNum, root) {
             start: { line: lineNum, character: xStart },
             end:   { line: lineNum, character: wordEnd },
           },
-          newText: `x-${c.tagName}$1 />`,
+          newText: buildTagSnippet(c, indent, indentUnit),
         },
       };
+
+      // Mark the best match as preselected so Zed prioritises it over
+      // built-in Emmet completions even when fuzzy scores tie.
+      if (i === 0) item.preselect = true;
+
+      return item;
     });
+
+  // ── "Create new component" scaffold item ──────────────────────────────────
+  // Offered whenever the user has typed a non-empty name, at the bottom of the
+  // list. Selecting it inserts a block-form tag and triggers file creation.
+  if (typed && root) {
+    const relPath    = typed.replace(/\./g, '/');
+    const createSnip = `x-${typed} />`;
+
+    items.push({
+      label:            `x-${typed}  (create component)`,
+      kind:             15, // Snippet
+      detail:           `New: resources/views/components/${relPath}.blade.php`,
+      filterText,
+      insertTextFormat: 2,
+      sortText:         '\xff' + typed, // always last
+      textEdit: {
+        range: {
+          start: { line: lineNum, character: xStart },
+          end:   { line: lineNum, character: wordEnd },
+        },
+        newText: createSnip,
+      },
+      command: {
+        title:     'Create Blade component',
+        command:   'laravel.createComponent',
+        arguments: [typed, root],
+      },
+    });
+  }
 
   return items.length ? items : null;
 }

@@ -208,6 +208,36 @@ function parseBladeProps(content) {
   return props;
 }
 
+// ── Slot detection ────────────────────────────────────────────────────────────
+
+const SLOT_METHOD_NAMES = new Set(['has', 'isEmpty', 'isNotEmpty', 'hasActualContent', 'attributes']);
+
+/**
+ * Detect default and named slots used in a Blade file.
+ * - Default slot: `$slot` used as a variable (not a method chain like `$slot->...`)
+ * - Named slots:  `$slots->name` where `name` is not a framework helper method
+ *
+ * Returns { hasSlot: bool, namedSlots: string[] }
+ */
+function parseSlots(content) {
+  if (!content) return { hasSlot: false, namedSlots: [] };
+
+  // $slot as a standalone variable — word-boundary, not followed by -> or [
+  const hasSlot = /\$slot\b(?!\s*(?:->|\[))/.test(content);
+
+  const namedSlots = [];
+  const re = /\$slots->(\w+)/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const name = m[1];
+    if (!SLOT_METHOD_NAMES.has(name) && !namedSlots.includes(name)) {
+      namedSlots.push(name);
+    }
+  }
+
+  return { hasSlot, namedSlots };
+}
+
 // ── File discovery ────────────────────────────────────────────────────────────
 
 /**
@@ -313,6 +343,8 @@ function discoverComponents(root) {
       viewFile:  null,
       props,
       isAnonymous: false,
+      hasSlot:    false,   // populated later when view file is found
+      namedSlots: [],
     };
   }
 
@@ -323,16 +355,22 @@ function discoverComponents(root) {
   for (const filePath of bladeFiles) {
     const tagName = viewFileToTag(filePath, viewDir);
 
-    if (byTag[tagName]) {
-      // Class-based wins — just attach the view file if missing
-      if (!byTag[tagName].viewFile) byTag[tagName].viewFile = filePath;
-      continue;
-    }
-
     let content = '';
     try { content = fs.readFileSync(filePath, 'utf8'); } catch (_) { /* keep empty */ }
 
+    if (byTag[tagName]) {
+      // Class-based wins — attach view file and parse slots from it
+      if (!byTag[tagName].viewFile) {
+        byTag[tagName].viewFile = filePath;
+        const { hasSlot, namedSlots } = parseSlots(content);
+        byTag[tagName].hasSlot    = hasSlot;
+        byTag[tagName].namedSlots = namedSlots;
+      }
+      continue;
+    }
+
     const props = parseBladeProps(content);
+    const { hasSlot, namedSlots } = parseSlots(content);
 
     byTag[tagName] = {
       tagName,
@@ -341,6 +379,8 @@ function discoverComponents(root) {
       viewFile:    filePath,
       props,
       isAnonymous: true,
+      hasSlot,
+      namedSlots,
     };
   }
 
