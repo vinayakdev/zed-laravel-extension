@@ -253,7 +253,7 @@ function detectEloquentArgContext(lineText, character, fileText, lineNum) {
     const arrayKeyRe = /(?:->|::)(\w+)\s*\(\s*\[(?:[^\[\]]*,\s*)?["']([^"']*)$/;
     const arrayMatch = arrayKeyRe.exec(prefix);
     if (arrayMatch && ELOQUENT_FILL_METHODS.has(arrayMatch[1])) {
-        const className = resolveEloquentClass(prefix, fileText, lineNum);
+        const className = resolveEloquentClass(prefix, arrayMatch.index, fileText, lineNum);
         if (!className) return null;
         return { type: 'fillable', className, typed: arrayMatch[2] };
     }
@@ -271,24 +271,45 @@ function detectEloquentArgContext(lineText, character, fileText, lineNum) {
     else if (ELOQUENT_REL_METHODS.has(methodName))  type = 'relation';
     else return null;
 
-    const className = resolveEloquentClass(prefix, fileText, lineNum);
+    // Pass argMatch.index so resolveEloquentClass only looks at the receiver
+    // segment before this specific method call — avoids picking up $this or
+    // an unrelated class earlier in the line.
+    const className = resolveEloquentClass(prefix, argMatch.index, fileText, lineNum);
     if (!className) return null;
 
     return { type, className, typed };
 }
 
 /**
- * Resolve the Eloquent model class name from the line prefix.
- * Looks for ClassName:: (static) or $var-> (instance, then infers type).
+ * Resolve the Eloquent model class name from the part of the line that comes
+ * before the method call at `methodCallIndex`.
+ *
+ * @param {string} prefix          - full line text up to cursor
+ * @param {number} methodCallIndex - index of the `->` or `::` that starts the method call
+ * @param {string} fileText        - full document text (for variable type inference)
+ * @param {number} lineNum         - 0-based line number (for variable type inference)
  */
-function resolveEloquentClass(prefix, fileText, lineNum) {
-    // Static call: User::where(  or User::query()->where(
-    const staticMatch = prefix.match(/\b([A-Z][a-zA-Z0-9_]*)::(?!\$)/);
-    if (staticMatch) return staticMatch[1];
+function resolveEloquentClass(prefix, methodCallIndex, fileText, lineNum) {
+    // `before` is everything up to (but not including) the `->` or `::` at methodCallIndex.
+    // For "User::with('", methodCallIndex=4 so before="User" (no `::` included).
+    const before = prefix.slice(0, methodCallIndex);
 
-    // Instance call: $user->where(
-    const instanceMatch = prefix.match(/\$([a-zA-Z_]\w*)->/);
-    if (instanceMatch) return inferVariableType(instanceMatch[1], fileText, lineNum) || null;
+    // Direct static call: the receiver is an uppercase class name at the very end
+    // of `before`, e.g. before="User" from "User::with(".
+    const directStatic = before.match(/\b([A-Z][a-zA-Z0-9_]*)$/);
+    if (directStatic) return directStatic[1];
+
+    // Chained static: User::query()->with( — `before` contains "User::query()"
+    const chainStatic = before.match(/\b([A-Z][a-zA-Z0-9_]*)::/);
+    if (chainStatic) return chainStatic[1];
+
+    // Direct instance: $var-> immediately before this method call (skip $this)
+    const directInstance = before.match(/\$(?!this\b)([a-zA-Z_]\w*)\s*$/);
+    if (directInstance) return inferVariableType(directInstance[1], fileText, lineNum) || null;
+
+    // Chained instance: $var->something()-> — first non-$this var in the chain
+    const chainInstance = before.match(/\$(?!this\b)([a-zA-Z_]\w*)->/);
+    if (chainInstance) return inferVariableType(chainInstance[1], fileText, lineNum) || null;
 
     return null;
 }
@@ -357,6 +378,64 @@ function buildModelCompletionItems(type, className, typed, lineNum, character, r
     }
 
     return [];
+}
+
+/**
+ * If the cursor is on a quoted string inside a relation method (with, whereHas, etc.),
+ * navigate to that relation's method definition inside the model file.
+ *
+ * Returns an LSP Location or null.
+ */
+function resolveRelationDefinition(fileText, lineNum, character, root, pathToUri) {
+    const lineText = fileText.split('\n')[lineNum] || '';
+
+    // Find the full quoted string the cursor is inside (e.g. 'blogs' or "blogs")
+    const quotedRe = /["']([a-zA-Z_]\w*)["']/g;
+    let relationName = null;
+    let qm;
+    while ((qm = quotedRe.exec(lineText)) !== null) {
+        // +1 / -1 to exclude the quote chars themselves
+        if (character >= qm.index + 1 && character <= qm.index + qm[0].length - 1) {
+            relationName = qm[1];
+            break;
+        }
+    }
+    if (!relationName) return null;
+
+    // Use the position at the end of the quoted string to detect context
+    const endOfQuote = qm.index + qm[0].length;
+    const modelCtx = detectEloquentArgContext(lineText, endOfQuote, fileText, lineNum);
+    if (!modelCtx || modelCtx.type !== 'relation') return null;
+
+    const { className } = modelCtx;
+
+    // Verify the relation exists on this model
+    const model = getModelData(className, root);
+    if (!model) return null;
+    const relation = model.relations.find(r => r.name === relationName);
+    if (!relation) return null;
+
+    // Find the model file via the class discovery cache
+    const { discoverPhpClasses } = require('./php/discovery');
+    const classEntry = discoverPhpClasses(root).find(c => c.className === className);
+    if (!classEntry || !classEntry.file) return null;
+
+    // Scan the model file for the relation method definition line
+    let methodLine = 0;
+    try {
+        const src   = require('fs').readFileSync(classEntry.file, 'utf8');
+        const lines = src.split('\n');
+        const methodRe = new RegExp(`function\\s+${relationName}\\s*\\(`);
+        for (let i = 0; i < lines.length; i++) {
+            if (methodRe.test(lines[i])) { methodLine = i; break; }
+        }
+    } catch (_) { return null; }
+
+    return {
+        uri:   pathToUri(classEntry.file),
+        range: { start: { line: methodLine, character: 0 },
+                 end:   { line: methodLine, character: 0 } },
+    };
 }
 
 // ── §7  Message handler ──────────────────────────────────────────────────────
@@ -481,6 +560,11 @@ function handleMessage(msg) {
         // Try class-name navigation first; fall through to view() navigation if it returns nothing
         const classDef = phpDefinition(text, line, character, workspaceRoot, pathToUri);
         if (classDef) { send({ jsonrpc: '2.0', id, result: classDef }); break; }
+
+        // Eloquent relation go-to-definition: cursor on 'relationName' inside with()/whereHas()/etc.
+        // Extract the full quoted word at the cursor position, then resolve the model + method.
+        const relDef = resolveRelationDefinition(text, line, character, workspaceRoot, pathToUri);
+        if (relDef) { send({ jsonrpc: '2.0', id, result: relDef }); break; }
 
         // view('some.view') in controllers / routes
         const viewName = findViewAtPosition(text, line, character);
