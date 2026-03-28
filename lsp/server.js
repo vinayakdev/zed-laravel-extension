@@ -15,6 +15,8 @@ const { discoverComponents, invalidateComponentCache, componentTagToFiles } = re
 const { getRoutes, invalidateRouteCache, invalidateAllRouteCaches, refreshArtisanRoutes } = require('./php/routes');
 const { getConfigEntries, invalidateConfigCache } = require('./php/config');
 const { parseEnvFile } = require('./php/env');
+const { getModelData, invalidateModelCache } = require('./php/models');
+const { inferVariableType } = require('./php/inference');
 
 // ── §1  Infrastructure ───────────────────────────────────────────────────────
 
@@ -220,6 +222,143 @@ function configCompletionItems(rootPath, typed, lineNum, character) {
         });
 }
 
+// ── §6b  Eloquent argument-context detection ──────────────────────────────────
+
+const ELOQUENT_ATTR_METHODS = new Set([
+    'where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween',
+    'whereNull', 'whereNotNull', 'orderBy', 'orderByDesc', 'select',
+    'addSelect', 'groupBy', 'value', 'pluck', 'max', 'min', 'sum',
+    'avg', 'increment', 'decrement', 'whereColumn', 'firstWhere',
+]);
+
+const ELOQUENT_REL_METHODS = new Set([
+    'with', 'without', 'withCount', 'withAvg', 'withSum', 'withMax',
+    'withMin', 'whereHas', 'orWhereHas', 'whereDoesntHave',
+    'orWhereDoesntHave', 'has', 'doesntHave', 'orHas', 'orDoesntHave',
+]);
+
+const ELOQUENT_FILL_METHODS = new Set([
+    'create', 'forceCreate', 'make', 'fill', 'firstOrCreate',
+    'firstOrNew', 'updateOrCreate', 'update',
+]);
+
+/**
+ * Detect if the cursor is inside an Eloquent method string argument.
+ * Returns { type: 'attribute'|'relation'|'fillable', className, typed } or null.
+ */
+function detectEloquentArgContext(lineText, character, fileText, lineNum) {
+    const prefix = lineText.slice(0, character);
+
+    // Array-key context: ->create(['col|  or ->update(['col|
+    const arrayKeyRe = /(?:->|::)(\w+)\s*\(\s*\[(?:[^\[\]]*,\s*)?["']([^"']*)$/;
+    const arrayMatch = arrayKeyRe.exec(prefix);
+    if (arrayMatch && ELOQUENT_FILL_METHODS.has(arrayMatch[1])) {
+        const className = resolveEloquentClass(prefix, fileText, lineNum);
+        if (!className) return null;
+        return { type: 'fillable', className, typed: arrayMatch[2] };
+    }
+
+    // String-argument context: ->where('col|  or ::where('col|
+    const argRe = /(?:->|::)(\w+)\s*\((?:[^()]*,\s*)?["']([^"']*)$/;
+    const argMatch = argRe.exec(prefix);
+    if (!argMatch) return null;
+
+    const methodName = argMatch[1];
+    const typed      = argMatch[2];
+
+    let type;
+    if      (ELOQUENT_ATTR_METHODS.has(methodName)) type = 'attribute';
+    else if (ELOQUENT_REL_METHODS.has(methodName))  type = 'relation';
+    else return null;
+
+    const className = resolveEloquentClass(prefix, fileText, lineNum);
+    if (!className) return null;
+
+    return { type, className, typed };
+}
+
+/**
+ * Resolve the Eloquent model class name from the line prefix.
+ * Looks for ClassName:: (static) or $var-> (instance, then infers type).
+ */
+function resolveEloquentClass(prefix, fileText, lineNum) {
+    // Static call: User::where(  or User::query()->where(
+    const staticMatch = prefix.match(/\b([A-Z][a-zA-Z0-9_]*)::(?!\$)/);
+    if (staticMatch) return staticMatch[1];
+
+    // Instance call: $user->where(
+    const instanceMatch = prefix.match(/\$([a-zA-Z_]\w*)->/);
+    if (instanceMatch) return inferVariableType(instanceMatch[1], fileText, lineNum) || null;
+
+    return null;
+}
+
+/**
+ * Build LSP completion items for Eloquent model attributes, relations, or fillable fields.
+ */
+function buildModelCompletionItems(type, className, typed, lineNum, character, root) {
+    const model = getModelData(className, root);
+    if (!model) return [];
+
+    const replaceStart = character - typed.length;
+
+    if (type === 'attribute') {
+        return model.attributes
+            .filter(a => !typed || a.name.startsWith(typed))
+            .map(a => {
+                const parts = [a.type, a.cast ? `cast:${a.cast}` : '', a.fillable ? 'fillable' : ''].filter(Boolean);
+                return {
+                    label:      a.name,
+                    kind:       12,
+                    detail:     parts.join(' · ') || 'attribute',
+                    textEdit: {
+                        range:   { start: { line: lineNum, character: replaceStart },
+                                   end:   { line: lineNum, character } },
+                        newText: a.name,
+                    },
+                    filterText: a.name,
+                    sortText:   '\x00' + a.name,
+                };
+            });
+    }
+
+    if (type === 'relation') {
+        return model.relations
+            .filter(r => !typed || r.name.startsWith(typed))
+            .map(r => ({
+                label:      r.name,
+                kind:       12,
+                detail:     `${r.type} → ${r.related}`,
+                textEdit: {
+                    range:   { start: { line: lineNum, character: replaceStart },
+                               end:   { line: lineNum, character } },
+                    newText: r.name,
+                },
+                filterText: r.name,
+                sortText:   '\x00' + r.name,
+            }));
+    }
+
+    if (type === 'fillable') {
+        return model.attributes
+            .filter(a => a.fillable && (!typed || a.name.startsWith(typed)))
+            .map(a => ({
+                label:      a.name,
+                kind:       12,
+                detail:     [a.type, a.cast ? `cast:${a.cast}` : ''].filter(Boolean).join(' · ') || 'fillable',
+                textEdit: {
+                    range:   { start: { line: lineNum, character: replaceStart },
+                               end:   { line: lineNum, character } },
+                    newText: a.name,
+                },
+                filterText: a.name,
+                sortText:   '\x00' + a.name,
+            }));
+    }
+
+    return [];
+}
+
 // ── §7  Message handler ──────────────────────────────────────────────────────
 
 function handleMessage(msg) {
@@ -240,6 +379,7 @@ function handleMessage(msg) {
           capabilities: {
             textDocumentSync: { openClose: true, change: 1 },
             definitionProvider: true,
+            hoverProvider: true,
             completionProvider: { triggerCharacters: ['@', '$', ':', '-', '>', "'", '"', '.'], resolveProvider: false },
             executeCommandProvider: { commands: ['laravel.createComponent'] },
           },
@@ -265,6 +405,8 @@ function handleMessage(msg) {
       if (isBladeFile(openUri) && openUri.includes('/resources/views/components/')) invalidateComponentCache();
       if (isPhpFile(openUri)   && openUri.includes('/routes/'))  invalidateAllRouteCaches();
       if (isPhpFile(openUri)   && openUri.includes('/config/'))  invalidateConfigCache();
+      if (isPhpFile(openUri) && (openUri.includes('/app/Models/') || openUri.includes('/database/migrations/')))
+          invalidateModelCache();
       break;
     }
 
@@ -277,6 +419,8 @@ function handleMessage(msg) {
       if (isBladeFile(changeUri) && changeUri.includes('/resources/views/components/')) invalidateComponentCache();
       if (isPhpFile(changeUri)   && changeUri.includes('/routes/'))  invalidateAllRouteCaches();
       if (isPhpFile(changeUri)   && changeUri.includes('/config/'))  invalidateConfigCache();
+      if (isPhpFile(changeUri) && (changeUri.includes('/app/Models/') || changeUri.includes('/database/migrations/')))
+          invalidateModelCache();
       break;
     }
 
@@ -305,6 +449,19 @@ function handleMessage(msg) {
           send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items } });
           break;
         }
+      }
+
+      // Eloquent model argument completions (attributes / relations / fillable)
+      if (workspaceRoot && (isPhpFile(uri) || isBladeFile(uri))) {
+          const modelCtx = detectEloquentArgContext(lineText, character, text, lineNum);
+          if (modelCtx) {
+              const items = buildModelCompletionItems(
+                  modelCtx.type, modelCtx.className, modelCtx.typed,
+                  lineNum, character, workspaceRoot
+              );
+              send({ jsonrpc: '2.0', id, result: { isIncomplete: true, items } });
+              break;
+          }
       }
 
       if      (isPhpFile(uri)   && workspaceRoot) completionResult = phpCompletions(lineText, character, lineNum, text, workspaceRoot);
@@ -373,6 +530,60 @@ function handleMessage(msg) {
           if (!promptedPaths.has(filePath)) promptCreateView(filePath, viewName);
         }
         break;
+      }
+
+      send({ jsonrpc: '2.0', id, result: null });
+      break;
+    }
+
+    // Hover — show model attribute/relation info
+    case 'textDocument/hover': {
+      const uri      = params.textDocument.uri;
+      const text     = documents[uri] || '';
+      const { line: lineNum, character } = params.position;
+      const lineText = text.split('\n')[lineNum] || '';
+
+      if (workspaceRoot && isPhpFile(uri)) {
+        // Find quoted word under cursor
+        const wordRe = /["']([a-zA-Z_]\w*)["']/g;
+        let hoveredWord = null;
+        let wm;
+        while ((wm = wordRe.exec(lineText)) !== null) {
+          if (character >= wm.index + 1 && character <= wm.index + wm[0].length - 1) {
+            hoveredWord = wm[1];
+            break;
+          }
+        }
+
+        if (hoveredWord) {
+          const modelCtx = detectEloquentArgContext(lineText, character, text, lineNum);
+          if (modelCtx) {
+            const model = getModelData(modelCtx.className, workspaceRoot);
+            if (model) {
+              const attr = model.attributes.find(a => a.name === hoveredWord);
+              if (attr) {
+                const lines = [
+                  `**${modelCtx.className}** · \`${attr.name}\``,
+                  `**Type:** ${attr.type || 'unknown'}`,
+                  attr.cast ? `**Cast:** ${attr.cast}` : null,
+                  `**Fillable:** ${attr.fillable ? 'yes ✓' : 'no'}`,
+                ].filter(Boolean);
+                send({ jsonrpc: '2.0', id, result: { contents: { kind: 'markdown', value: lines.join('\n\n') } } });
+                break;
+              }
+              const rel = model.relations.find(r => r.name === hoveredWord);
+              if (rel) {
+                const lines = [
+                  `**${modelCtx.className}** relation · \`${rel.name}\``,
+                  `**Type:** ${rel.type}`,
+                  `**Related:** \`${rel.related}\``,
+                ];
+                send({ jsonrpc: '2.0', id, result: { contents: { kind: 'markdown', value: lines.join('\n\n') } } });
+                break;
+              }
+            }
+          }
+        }
       }
 
       send({ jsonrpc: '2.0', id, result: null });
