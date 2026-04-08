@@ -184,7 +184,8 @@ function parseProperties(classBody) {
 
 // ── Class cache ──────────────────────────────────────────────────────────────
 
-let cache = null;
+let cache    = null;          // ClassEntry[]
+let cacheMap = null;          // Map<className, ClassEntry> — O(1) lookup index
 
 function discoverPhpClasses(root) {
   if (cache) return cache;
@@ -248,10 +249,21 @@ function discoverPhpClasses(root) {
     classRe.lastIndex = 0;
   }
 
-  return (cache = classes);
+  cache    = classes;
+  cacheMap = new Map(classes.map(c => [c.className, c]));
+  return cache;
 }
 
-function invalidateCache() { cache = null; }
+/**
+ * O(1) lookup by short class name. Preferred over discoverPhpClasses().find().
+ * Builds the cache on first call if not already populated.
+ */
+function getAppClass(root, name) {
+  if (!cache) discoverPhpClasses(root);
+  return cacheMap ? cacheMap.get(name) || null : null;
+}
+
+function invalidateCache() { cache = null; cacheMap = null; }
 
 // ── Import helpers ───────────────────────────────────────────────────────────
 
@@ -275,4 +287,4 @@ function isAlreadyImported(text, fqn) {
   return new RegExp(`^\\s*use\\s+${esc}(\\s+as\\s+|;)`, 'm').test(text);
 }
 
-module.exports = { collectPhpFiles, discoverPhpClasses, invalidateCache, getUseInsertLine, isAlreadyImported };
+module.exports = { collectPhpFiles, discoverPhpClasses, getAppClass, invalidateCache, getUseInsertLine, isAlreadyImported };

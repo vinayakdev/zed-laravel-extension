@@ -61,8 +61,15 @@ function extractCompactArgs(text) {
   return vars;
 }
 
-function findViewVariables(viewName, root) {
-  const vars  = new Set();
+// ── View-variable index ───────────────────────────────────────────────────────
+// Built lazily on first use; maps view name → Set<variable name>.
+// Invalidated when the cache root changes or invalidateViewVarCache() is called.
+
+let viewVarIndex     = null; // Map<viewName, Set<varName>>
+let viewVarIndexRoot = null;
+
+function buildViewVarIndex(root) {
+  const index = new Map();
   const files = [];
   for (const dir of ['app', 'routes']) collectPhpFiles(path.join(root, dir), files);
   try {
@@ -70,8 +77,8 @@ function findViewVariables(viewName, root) {
       if (f.endsWith('.php')) files.push(path.join(root, f));
   } catch (_) {}
 
-  const escaped = viewName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const callRe  = new RegExp(`view\\s*\\(\\s*['"]${escaped}['"]\\s*,\\s*`, 'g');
+  // Match: view('some.view', [... or view('some.view', compact(...
+  const callRe = /view\s*\(\s*['"]([^'"]+)['"]\s*,\s*/g;
 
   for (const file of files) {
     let content;
@@ -79,16 +86,31 @@ function findViewVariables(viewName, root) {
     callRe.lastIndex = 0;
     let m;
     while ((m = callRe.exec(content)) !== null) {
+      const name  = m[1];
       const after = content.slice(callRe.lastIndex).trimStart();
       const extracted = after.startsWith('compact')
         ? extractCompactArgs(after)
         : after.startsWith('[')
           ? extractArrayKeys(after)
           : [];
-      for (const v of extracted) vars.add(v);
+      if (extracted.length === 0) continue;
+      let set = index.get(name);
+      if (!set) { set = new Set(); index.set(name, set); }
+      for (const v of extracted) set.add(v);
     }
   }
-  return [...vars];
+  return index;
+}
+
+function invalidateViewVarCache() { viewVarIndex = null; viewVarIndexRoot = null; }
+
+function findViewVariables(viewName, root) {
+  if (!viewVarIndex || viewVarIndexRoot !== root) {
+    viewVarIndex     = buildViewVarIndex(root);
+    viewVarIndexRoot = root;
+  }
+  const set = viewVarIndex.get(viewName);
+  return set ? [...set] : [];
 }
 
 // ── view() call detection (for Go to Definition) ────────────────────────────
@@ -104,10 +126,42 @@ function findViewAtPosition(text, line, character) {
   return null;
 }
 
+// ── Blade directive view detection (for Go to Definition) ────────────────────
+//
+// Handles:
+//   @include('view.name')
+//   @includeIf('view.name')
+//   @extends('view.name')
+//   @includeWhen(condition, 'view.name')
+//   @includeUnless(condition, 'view.name')
+
+function findBladeDirectiveViewAtPosition(text, line, character) {
+  const lineText = text.split('\n')[line] || '';
+  let m;
+
+  // First-argument directives: @include, @includeIf, @extends
+  const firstArgRe = /@(?:include(?:If)?|extends)\s*\(\s*(['"])([^'"]+)\1/g;
+  while ((m = firstArgRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= firstArgRe.lastIndex)
+      return m[2];
+  }
+
+  // Second-argument directives: @includeWhen(cond, 'view'), @includeUnless(cond, 'view')
+  const condRe = /@include(?:When|Unless)\s*\([^,]+,\s*(['"])([^'"]+)\1/g;
+  while ((m = condRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= condRe.lastIndex)
+      return m[2];
+  }
+
+  return null;
+}
+
 module.exports = {
   getViewNameFromUri,
   resolveViewPath,
   createBladeFile,
   findViewVariables,
+  invalidateViewVarCache,
   findViewAtPosition,
+  findBladeDirectiveViewAtPosition,
 };

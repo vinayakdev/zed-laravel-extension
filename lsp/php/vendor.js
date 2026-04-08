@@ -8,7 +8,9 @@ const path = require('path');
 /** Map<root, Map<fqn, absoluteFilePath>> — populated once per workspace root */
 const classmapCache = new Map();
 
-/** Map<className, entry> — parsed vendor class entries, never invalidated */
+// Map<className, entry> — parsed vendor class entries.
+// Capped at VENDOR_CACHE_MAX using LRU eviction (Map preserves insertion order).
+const VENDOR_CACHE_MAX = 300;
 const vendorClassCache = new Map();
 
 // ── Classmap parser ───────────────────────────────────────────────────────────
@@ -255,7 +257,9 @@ function getVendorClass(className, fileText, root) {
   const entry = parseVendorFile(filePath, className);
   if (!entry) return null;
 
-  // 4. Cache and return
+  // 4. Cache with LRU eviction and return
+  if (vendorClassCache.has(className)) vendorClassCache.delete(className);
+  else if (vendorClassCache.size >= VENDOR_CACHE_MAX) vendorClassCache.delete(vendorClassCache.keys().next().value);
   vendorClassCache.set(className, entry);
   return entry;
 }

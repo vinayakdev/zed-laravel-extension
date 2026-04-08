@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('fs');
-const { discoverPhpClasses, getUseInsertLine, isAlreadyImported } = require('./discovery');
+const { discoverPhpClasses, getAppClass, getUseInsertLine, isAlreadyImported } = require('./discovery');
 const { ELOQUENT_METHODS, CHAIN_METHODS }                          = require('./data');
 const { resolveMembers }                                           = require('./resolver');
 const { getVendorClass }                                           = require('./vendor');
@@ -35,7 +35,7 @@ function scopeCallParams(params) {
 /** Build opts object for resolveMembers */
 function makeOpts(root, fileText, context, callerVisibility) {
   return {
-    getAppClass:      (name) => discoverPhpClasses(root).find(c => c.className === name) || null,
+    getAppClass:      (name) => getAppClass(root, name),
     getVendorClass:   (name, r) => getVendorClass(name, fileText, r),
     root,
     context,
@@ -183,7 +183,7 @@ function parentCompletions(lineText, character, lineNum, fileText, root) {
   const currentClass = inferCurrentClass(fileText, lineNum);
   if (!currentClass) return null;
 
-  const appClass = discoverPhpClasses(root).find(c => c.className === currentClass);
+  const appClass = getAppClass(root, currentClass);
   if (!appClass || !appClass.extends) return null;
 
   const opts = makeOpts(root, fileText, 'instance', 'inside');
@@ -229,7 +229,7 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
   const methodStart = character - typedMethod.length;
   const nextChar    = lineText[character] || '';
 
-  const entry = discoverPhpClasses(root).find(c => c.className === className)
+  const entry = getAppClass(root, className)
              || getVendorClass(className, fileText, root);
 
   if (entry) {
@@ -253,7 +253,7 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
   }
 
   // Fallback: scan file for static functions + Eloquent check (handles legacy cache miss)
-  const classEntry = discoverPhpClasses(root).find(c => c.className === className);
+  const classEntry = getAppClass(root, className);
   if (!classEntry) return null;
 
   let methods = [];
@@ -283,7 +283,7 @@ function staticCompletions(lineText, character, lineNum, fileText, root) {
  */
 function scopeMethodsAsChain(className, root) {
   if (!root) return [];
-  const entry = discoverPhpClasses(root).find(c => c.className === className);
+  const entry = getAppClass(root, className);
   if (!entry) return [];
   return (entry.methods || [])
     .filter(m => m.isScope)
@@ -387,9 +387,70 @@ function classImportCompletions(lineText, character, lineNum, fileText, root) {
   return items.length ? items : null;
 }
 
+// ── PHP method/property snippet completions ──────────────────────────────────
+//
+// Triggered when the user types `pub` or `pubf` at the start of a line
+// (with optional leading whitespace).  Expands into full public declarations.
+
+const PHP_SNIPPETS = [
+  {
+    triggers: ['pub', 'pubf'],
+    label:    'public function',
+    detail:   'public function name() { ... }',
+    // ${0} marks the final cursor position (inside the body)
+    template: (ind) => `public function \${1:methodName}(\${2})\n${ind}{\n${ind}    \${0}\n${ind}}`,
+  },
+  {
+    triggers: ['pub'],
+    label:    'public $property',
+    detail:   'public property declaration',
+    template: ()    => 'public $\${1:property};',
+  },
+  {
+    triggers: ['pub'],
+    label:    'public static function',
+    detail:   'public static function name() { ... }',
+    template: (ind) => `public static function \${1:methodName}(\${2})\n${ind}{\n${ind}    \${0}\n${ind}}`,
+  },
+];
+
+function phpSnippetCompletions(lineText, character, lineNum) {
+  const before = lineText.slice(0, character);
+  // Only fires at line start (optional indentation, then the keyword, nothing else)
+  const m = before.match(/^(\s*)(pub(?:f)?)$/i);
+  if (!m) return null;
+
+  const indent    = m[1];
+  const typed     = m[2];
+  const wordStart = character - typed.length;
+  const lc        = typed.toLowerCase();
+
+  const items = PHP_SNIPPETS
+    .filter(s => s.triggers.some(t => t.startsWith(lc)))
+    .map((s, i) => ({
+      label:            s.label,
+      kind:             15, // Snippet
+      detail:           s.detail,
+      insertTextFormat: 2,
+      filterText:       typed,
+      sortText:         '\x00' + i.toString().padStart(4, '0'),
+      textEdit: {
+        range:   { start: { line: lineNum, character: wordStart },
+                   end:   { line: lineNum, character } },
+        newText: s.template(indent),
+      },
+    }));
+
+  return items.length ? items : null;
+}
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 function phpCompletions(lineText, character, lineNum, fileText, root) {
+  // pub / pubf — public function/property/static snippets at line start
+  const snippets = phpSnippetCompletions(lineText, character, lineNum);
+  if (snippets)    return { isIncomplete: false, items: snippets };
+
   // $this-> — instance members of current class (inside visibility)
   const thisItems = thisCompletions(lineText, character, lineNum, fileText, root);
   if (thisItems)    return { isIncomplete: true, items: thisItems };
