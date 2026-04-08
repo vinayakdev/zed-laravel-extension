@@ -8,9 +8,9 @@ const path = require('path');
 
 const { phpCompletions }  = require('./php/completions');
 const { phpDefinition }   = require('./php/definition');
-const { invalidateCache } = require('./php/discovery');
+const { invalidateCache, discoverPhpClasses } = require('./php/discovery');
 const { bladeCompletions } = require('./blade/completions');
-const { resolveViewPath, createBladeFile, findViewAtPosition } = require('./blade/views');
+const { resolveViewPath, createBladeFile, findViewAtPosition, findBladeDirectiveViewAtPosition } = require('./blade/views');
 const { discoverComponents, invalidateComponentCache, componentTagToFiles } = require('./blade/components');
 const { getRoutes, invalidateRouteCache, invalidateAllRouteCaches, refreshArtisanRoutes } = require('./php/routes');
 const { getConfigEntries, invalidateConfigCache } = require('./php/config');
@@ -24,6 +24,12 @@ let documents     = {};
 let workspaceRoot = null;
 let nextRequestId = 1;
 
+// Write a debug line to stderr — visible in Zed via: Extensions › laravel-view-lsp log
+// (or command palette → "zed: open log")
+function dbg(...args) {
+  process.stderr.write('[laravel-lsp] ' + args.join(' ') + '\n');
+}
+
 function send(obj) {
   const json = JSON.stringify(obj);
   process.stdout.write(`Content-Length: ${Buffer.byteLength(json, 'utf8')}\r\n\r\n${json}`);
@@ -35,10 +41,22 @@ function pathToUri(filePath) { return 'file://' + filePath; }
 function isBladeFile(uri) { return uri.endsWith('.blade.php'); }
 function isPhpFile(uri)   { return uri.endsWith('.php') && !isBladeFile(uri); }
 
+// Return document text from cache, falling back to disk if the file was already
+// open when the LSP started (didOpen was never received for it).
+function getDocumentText(uri) {
+  if (documents[uri] !== undefined) return documents[uri];
+  try {
+    const text = fs.readFileSync(uriToPath(uri), 'utf8');
+    documents[uri] = text; // warm the cache so subsequent requests are free
+    return text;
+  } catch (_) { return ''; }
+}
+
 // ── View-creation prompt state ───────────────────────────────────────────────
 
-let pendingCreations = {};
-let promptedPaths    = new Set();
+let pendingCreations       = {};
+let pendingMethodCreations = {};
+let promptedPaths          = new Set();
 
 function promptCreateView(filePath, viewName) {
   promptedPaths.add(filePath);
@@ -56,18 +74,60 @@ function promptCreateView(filePath, viewName) {
 }
 
 function handleCreateResponse(id, result) {
-  if (!pendingCreations[id]) return;
-  const { filePath, viewName } = pendingCreations[id];
-  delete pendingCreations[id];
-  promptedPaths.delete(filePath);
+  if (pendingCreations[id]) {
+    const { filePath, viewName } = pendingCreations[id];
+    delete pendingCreations[id];
+    promptedPaths.delete(filePath);
+    if (result?.title === 'Create File') {
+      createBladeFile(filePath);
+      send({ jsonrpc: '2.0', id: nextRequestId++, method: 'window/showDocument',
+             params: { uri: pathToUri(filePath), takeFocus: true } });
+      send({ jsonrpc: '2.0', method: 'window/showMessage',
+             params: { type: 3, message: `Created: resources/views/${viewName.replace(/\./g, '/')}.blade.php` } });
+    }
+    return;
+  }
 
-  if (result?.title !== 'Create File') return;
+  if (pendingMethodCreations[id]) {
+    const { filePath, className, methodName } = pendingMethodCreations[id];
+    delete pendingMethodCreations[id];
+    if (result?.title !== 'Create Method') return;
 
-  createBladeFile(filePath);
-  send({ jsonrpc: '2.0', id: nextRequestId++, method: 'window/showDocument',
-         params: { uri: pathToUri(filePath), takeFocus: true } });
-  send({ jsonrpc: '2.0', method: 'window/showMessage',
-         params: { type: 3, message: `Created: resources/views/${viewName.replace(/\./g, '/')}.blade.php` } });
+    let src;
+    try { src = fs.readFileSync(filePath, 'utf8'); } catch (_) { return; }
+
+    const lines    = src.split('\n');
+    // Find the last line that is just a closing brace — the class end
+    let insertAt = lines.length - 1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/^\s*\}\s*$/.test(lines[i])) { insertAt = i; break; }
+    }
+
+    const ind   = '    '; // 4-space indent
+    const stub  = `\n${ind}public function ${methodName}()\n${ind}{\n${ind}    //\n${ind}}\n`;
+    const newFnLine = insertAt + 1; // line index of `public function` after insert
+
+    send({
+      jsonrpc: '2.0', id: nextRequestId++,
+      method: 'workspace/applyEdit',
+      params: {
+        edit: {
+          changes: {
+            [pathToUri(filePath)]: [{
+              range:   { start: { line: insertAt, character: 0 },
+                         end:   { line: insertAt, character: 0 } },
+              newText: stub,
+            }],
+          },
+        },
+      },
+    });
+
+    send({ jsonrpc: '2.0', id: nextRequestId++, method: 'window/showDocument',
+           params: { uri: pathToUri(filePath), takeFocus: true,
+                     selection: { start: { line: newFnLine, character: ind.length },
+                                  end:   { line: newFnLine, character: ind.length + `public function ${methodName}()`.length } } } });
+  }
 }
 
 // ── Component file creation ───────────────────────────────────────────────────
@@ -133,6 +193,83 @@ function findXTagAtPosition(text, line, character) {
     }
   }
   return null;
+}
+
+// ── Controller method go-to-definition helpers ───────────────────────────────
+
+/**
+ * Detect if the cursor is on a controller method name in route definitions.
+ *
+ * Handles both syntaxes:
+ *   [WebsiteController::class, 'blogList']
+ *   [\App\Http\Controllers\WebsiteController::class, 'blogList']
+ *   'WebsiteController@blogList'  (legacy string syntax)
+ *
+ * Returns { className, methodName } or null.
+ */
+function findControllerMethodAtPosition(text, line, character) {
+  const lineText = text.split('\n')[line] || '';
+  let m;
+
+  // Array syntax: [ClassName::class, 'method']
+  const arrayRe = /\[\s*\\?(?:[\w\\]+\\)?(\w+)::class\s*,\s*(['"])(\w+)\2/g;
+  while ((m = arrayRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= arrayRe.lastIndex)
+      return { className: m[1], methodName: m[3] };
+  }
+
+  // Legacy string syntax: 'ClassName@method'
+  const strRe = /['"]([A-Z]\w*)@(\w+)['"]/g;
+  while ((m = strRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= strRe.lastIndex)
+      return { className: m[1], methodName: m[2] };
+  }
+
+  return null;
+}
+
+/**
+ * Resolve a controller method to an LSP Location.
+ * Returns { uri, range } pointing to the method definition, or null if not found.
+ */
+function resolveControllerMethod(className, methodName, root, pathToUri) {
+  const classEntry = discoverPhpClasses(root).find(c => c.className === className);
+  if (!classEntry) return null;
+
+  let methodLine = null;
+  try {
+    const src   = fs.readFileSync(classEntry.file, 'utf8');
+    const lines = src.split('\n');
+    const re    = new RegExp(`function\\s+${methodName}\\s*\\(`);
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) { methodLine = i; break; }
+    }
+  } catch (_) { return null; }
+
+  if (methodLine === null) return null;
+
+  return {
+    uri:   pathToUri(classEntry.file),
+    range: { start: { line: methodLine, character: 0 },
+             end:   { line: methodLine, character: 0 } },
+  };
+}
+
+/**
+ * Prompt the user to create a public method in an existing controller class.
+ */
+function promptCreateMethod(filePath, className, methodName) {
+  const reqId = nextRequestId++;
+  pendingMethodCreations[reqId] = { filePath, className, methodName };
+  send({
+    jsonrpc: '2.0', id: reqId,
+    method: 'window/showMessageRequest',
+    params: {
+      type:    2,
+      message: `Method "${methodName}" not found in ${className}. Create it?`,
+      actions: [{ title: 'Create Method' }, { title: 'Cancel' }],
+    },
+  });
 }
 
 // ── §6  route() / config() completion helpers ────────────────────────────────
@@ -452,6 +589,7 @@ function handleMessage(msg) {
       if      (params.workspaceFolders?.length > 0) workspaceRoot = uriToPath(params.workspaceFolders[0].uri);
       else if (params.rootUri)                       workspaceRoot = uriToPath(params.rootUri);
       else if (params.rootPath)                      workspaceRoot = params.rootPath;
+      dbg('initialized — workspaceRoot:', workspaceRoot);
       send({
         jsonrpc: '2.0', id,
         result: {
@@ -462,7 +600,7 @@ function handleMessage(msg) {
             completionProvider: { triggerCharacters: ['@', '$', ':', '-', '>', "'", '"', '.'], resolveProvider: false },
             executeCommandProvider: { commands: ['laravel.createComponent'] },
           },
-          serverInfo: { name: 'laravel-view-lsp', version: '0.1.0' },
+          serverInfo: { name: 'laravel-view-lsp', version: '0.1.2' },
         },
       });
       break;
@@ -510,7 +648,7 @@ function handleMessage(msg) {
     // Completions
     case 'textDocument/completion': {
       const uri      = params.textDocument.uri;
-      const text     = documents[uri] || '';
+      const text     = getDocumentText(uri);
       const { line: lineNum, character } = params.position;
       const lineText = text.split('\n')[lineNum] || '';
 
@@ -553,7 +691,7 @@ function handleMessage(msg) {
     // Definitions
     case 'textDocument/definition': {
       const uri  = params.textDocument.uri;
-      const text = documents[uri] || '';
+      const text = getDocumentText(uri);
       const { line, character } = params.position;
 
       if (isPhpFile(uri) && workspaceRoot) {
@@ -566,15 +704,34 @@ function handleMessage(msg) {
         const relDef = resolveRelationDefinition(text, line, character, workspaceRoot, pathToUri);
         if (relDef) { send({ jsonrpc: '2.0', id, result: relDef }); break; }
 
+        // Controller method in route array syntax: [ClassName::class, 'method']
+        const ctrlCtx = findControllerMethodAtPosition(text, line, character);
+        if (ctrlCtx) {
+          const ctrlDef = resolveControllerMethod(ctrlCtx.className, ctrlCtx.methodName, workspaceRoot, pathToUri);
+          if (ctrlDef) {
+            send({ jsonrpc: '2.0', id, result: ctrlDef }); break;
+          }
+          // Method not found — offer to create it
+          send({ jsonrpc: '2.0', id, result: null });
+          const classEntry = discoverPhpClasses(workspaceRoot).find(c => c.className === ctrlCtx.className);
+          if (classEntry) promptCreateMethod(classEntry.file, ctrlCtx.className, ctrlCtx.methodName);
+          break;
+        }
+
         // view('some.view') in controllers / routes
         const viewName = findViewAtPosition(text, line, character);
+        dbg('definition/php — uri:', uri);
+        dbg('definition/php — textLen:', text.length, 'line:', line, 'char:', character);
+        dbg('definition/php — viewName:', viewName);
         if (viewName) {
           const filePath = resolveViewPath(viewName, workspaceRoot);
+          dbg('definition/php — resolved path:', filePath, 'exists:', fs.existsSync(filePath));
           if (fs.existsSync(filePath)) {
             send({ jsonrpc: '2.0', id, result: { uri: pathToUri(filePath),
                    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } } });
           } else {
             send({ jsonrpc: '2.0', id, result: null });
+            if (!promptedPaths.has(filePath)) promptCreateView(filePath, viewName);
           }
           break;
         }
@@ -602,7 +759,9 @@ function handleMessage(msg) {
           }
         } catch (_) {}
 
-        const viewName = findViewAtPosition(text, line, character);
+        // view('some.view') call or @include/@extends/@includeIf/etc. directive
+        const viewName = findViewAtPosition(text, line, character)
+                      || findBladeDirectiveViewAtPosition(text, line, character);
         if (!viewName) { send({ jsonrpc: '2.0', id, result: null }); break; }
 
         const filePath = resolveViewPath(viewName, workspaceRoot);
@@ -623,7 +782,7 @@ function handleMessage(msg) {
     // Hover — show model attribute/relation info
     case 'textDocument/hover': {
       const uri      = params.textDocument.uri;
-      const text     = documents[uri] || '';
+      const text     = getDocumentText(uri);
       const { line: lineNum, character } = params.position;
       const lineText = text.split('\n')[lineNum] || '';
 

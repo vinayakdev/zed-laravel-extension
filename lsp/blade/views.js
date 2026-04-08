@@ -104,10 +104,41 @@ function findViewAtPosition(text, line, character) {
   return null;
 }
 
+// ── Blade directive view detection (for Go to Definition) ────────────────────
+//
+// Handles:
+//   @include('view.name')
+//   @includeIf('view.name')
+//   @extends('view.name')
+//   @includeWhen(condition, 'view.name')
+//   @includeUnless(condition, 'view.name')
+
+function findBladeDirectiveViewAtPosition(text, line, character) {
+  const lineText = text.split('\n')[line] || '';
+  let m;
+
+  // First-argument directives: @include, @includeIf, @extends
+  const firstArgRe = /@(?:include(?:If)?|extends)\s*\(\s*(['"])([^'"]+)\1/g;
+  while ((m = firstArgRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= firstArgRe.lastIndex)
+      return m[2];
+  }
+
+  // Second-argument directives: @includeWhen(cond, 'view'), @includeUnless(cond, 'view')
+  const condRe = /@include(?:When|Unless)\s*\([^,]+,\s*(['"])([^'"]+)\1/g;
+  while ((m = condRe.exec(lineText)) !== null) {
+    if (character >= m.index && character <= condRe.lastIndex)
+      return m[2];
+  }
+
+  return null;
+}
+
 module.exports = {
   getViewNameFromUri,
   resolveViewPath,
   createBladeFile,
   findViewVariables,
   findViewAtPosition,
+  findBladeDirectiveViewAtPosition,
 };
