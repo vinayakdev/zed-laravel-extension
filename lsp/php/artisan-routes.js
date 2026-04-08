@@ -162,21 +162,31 @@ function refreshArtisanRoutes(rootPath) {
  * Return routes for rootPath, covering ALL routes including those registered
  * in service providers, packages, and any file outside routes/.
  *
- * First call per root is synchronous (blocks until artisan finishes) so the
- * very first completion has complete data. After that, stale refreshes run
- * asynchronously in the background.
+ * On `initialized`, server.js calls refreshArtisanRoutes() which starts an
+ * async fetch. If that fetch is still running when the first completion fires,
+ * we return an empty array rather than blocking with spawnSync — the async
+ * result will populate the cache in the background and be available on the
+ * next request. If no async fetch is running, we fall back to a single sync
+ * load so the first completion still gets full data on slow networks.
  *
  * @param {string} rootPath
  * @returns {RouteEntry[]}
  */
 function getArtisanRoutes(rootPath) {
-    // First ever call for this root — load synchronously so completions are
-    // immediately complete (covers service-provider routes, package routes, etc.)
-    if (!initialSyncDone || !cache || cache.root !== rootPath) {
-        loadArtisanRoutesSync(rootPath);
+    if (!initialSyncDone) {
+        if (pending) {
+            // Async fetch already underway (started by server.js on initialized).
+            // Mark sync as done so we don't block on future calls; return empty
+            // for now — the async result will be cached shortly.
+            initialSyncDone = true;
+        } else {
+            // No async fetch in flight — do a one-time blocking load so the very
+            // first completion request has data (only happens if initialized fires
+            // before refreshArtisanRoutes is called, which is an edge case).
+            loadArtisanRoutesSync(rootPath);
+        }
     }
 
-    // Cache is now populated (or artisan failed and we have nothing).
     // Schedule an async background refresh if the data is getting stale.
     const stale = !cache
         || cache.root !== rootPath

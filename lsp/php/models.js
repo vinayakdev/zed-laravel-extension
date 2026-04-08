@@ -1,8 +1,10 @@
 'use strict';
 // Fetches Eloquent model metadata via `php artisan model:show ClassName --json`.
 // Results are cached per (root, className) for CACHE_TTL_MS milliseconds.
+// Uses async spawn to avoid blocking the LSP — first call returns null while
+// the process runs in the background; subsequent calls return the cached result.
 
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
 
@@ -11,6 +13,9 @@ const CACHE_TTL_MS = 30_000;
 // Map<string, { data: ModelData|null, ts: number }>
 // Key = root + ':' + className
 const modelCache = new Map();
+
+// Set<string> — keys currently being fetched; prevents duplicate spawns.
+const inFlight = new Set();
 
 function artisanExists(rootPath) {
     return fs.existsSync(path.join(rootPath, 'artisan'));
@@ -40,7 +45,14 @@ function normalise(raw) {
 
 /**
  * Return metadata for a single model class, running artisan if not cached.
- * Returns null if artisan is unavailable or the model cannot be resolved.
+ *
+ * Async-with-cache pattern: the first call for a class kicks off a background
+ * spawn and returns null immediately (no blocking). The LSP stays responsive.
+ * Once the spawn completes the data is cached, so the next completion request
+ * (triggered by the user's next keystroke) returns real attribute/relation data.
+ *
+ * Subsequent calls within CACHE_TTL_MS return the cached value instantly.
+ * Duplicate spawns for the same key are suppressed via the inFlight set.
  *
  * @param {string} className  Short or fully-qualified class name (e.g. "User" or "App\\Models\\User")
  * @param {string} root       Absolute path to the Laravel project root
@@ -55,38 +67,48 @@ function getModelData(className, root) {
         return cached.data;
     }
 
-    const php      = process.env.PHP_BINARY || 'php';
-    const extraPath = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'].join(':');
-    const env = {
-        ...process.env,
-        PATH: `${extraPath}:${process.env.PATH || ''}`,
-    };
+    // Already spawning for this key — return stale data or null without blocking.
+    if (inFlight.has(key)) return cached ? cached.data : null;
 
-    const result = spawnSync(
+    inFlight.add(key);
+
+    const php       = process.env.PHP_BINARY || 'php';
+    const extraPath = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'].join(':');
+    const env = { ...process.env, PATH: `${extraPath}:${process.env.PATH || ''}` };
+
+    let stdout = '';
+    let stderr = '';
+
+    const proc = spawn(
         php,
         ['artisan', 'model:show', className, '--json', '--no-ansi'],
-        { cwd: root, env, timeout: 10_000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }
+        { cwd: root, env }
     );
 
-    let data = null;
+    // Kill if it takes too long — prevents zombie processes on slow machines.
+    const timer = setTimeout(() => proc.kill(), 10_000);
 
-    if (!result.error && result.status === 0 && result.stdout) {
-        try {
-            // Trim leading non-JSON output (deprecation notices, etc.)
-            const start = result.stdout.indexOf('{');
-            if (start !== -1) {
-                const raw = JSON.parse(result.stdout.slice(start));
-                data = normalise(raw);
-            }
-        } catch (_) {}
-    } else if (result.stderr && result.stderr.trim()) {
-        process.stderr.write(
-            `[laravel-lsp] model:show ${className} failed: ${result.stderr.slice(0, 200)}\n`
-        );
-    }
+    proc.stdout.on('data', chunk => { stdout += chunk; });
+    proc.stderr.on('data', chunk => { stderr += chunk; });
 
-    modelCache.set(key, { data, ts: Date.now() });
-    return data;
+    proc.on('close', (code) => {
+        clearTimeout(timer);
+        inFlight.delete(key);
+
+        let data = null;
+        if (code === 0 && stdout) {
+            try {
+                const start = stdout.indexOf('{');
+                if (start !== -1) data = normalise(JSON.parse(stdout.slice(start)));
+            } catch (_) {}
+        } else if (stderr.trim()) {
+            process.stderr.write(`[laravel-lsp] model:show ${className} failed: ${stderr.slice(0, 200)}\n`);
+        }
+        modelCache.set(key, { data, ts: Date.now() });
+    });
+
+    // Return stale data if available, otherwise null (caller retries on next request).
+    return cached ? cached.data : null;
 }
 
 /**

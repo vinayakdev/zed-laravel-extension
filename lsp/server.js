@@ -8,9 +8,9 @@ const path = require('path');
 
 const { phpCompletions }  = require('./php/completions');
 const { phpDefinition }   = require('./php/definition');
-const { invalidateCache, discoverPhpClasses } = require('./php/discovery');
+const { invalidateCache, discoverPhpClasses, getAppClass } = require('./php/discovery');
 const { bladeCompletions } = require('./blade/completions');
-const { resolveViewPath, createBladeFile, findViewAtPosition, findBladeDirectiveViewAtPosition } = require('./blade/views');
+const { resolveViewPath, createBladeFile, findViewAtPosition, findBladeDirectiveViewAtPosition, invalidateViewVarCache } = require('./blade/views');
 const { discoverComponents, invalidateComponentCache, componentTagToFiles } = require('./blade/components');
 const { getRoutes, invalidateRouteCache, invalidateAllRouteCaches, refreshArtisanRoutes } = require('./php/routes');
 const { getConfigEntries, invalidateConfigCache } = require('./php/config');
@@ -20,9 +20,28 @@ const { inferVariableType } = require('./php/inference');
 
 // ── §1  Infrastructure ───────────────────────────────────────────────────────
 
-let documents     = {};
+// LRU document cache — keeps at most DOC_CACHE_MAX files in memory.
+// Map preserves insertion order so the oldest entry is always first.
+const DOC_CACHE_MAX = 50;
+let documents     = new Map();
 let workspaceRoot = null;
 let nextRequestId = 1;
+
+/** Upsert a document into the LRU cache, evicting the oldest if at capacity. */
+function setDocument(uri, text) {
+  if (documents.has(uri)) documents.delete(uri); // refresh position (move to end)
+  else if (documents.size >= DOC_CACHE_MAX) documents.delete(documents.keys().next().value);
+  documents.set(uri, text);
+}
+
+/** Simple debounce — returns a function that delays `fn` by `ms` on each call. */
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => { timer = null; fn(...args); }, ms); };
+}
+
+/** Debounced class-discovery invalidation — 150 ms quiet window after last change. */
+const debouncedInvalidateCache = debounce(invalidateCache, 150);
 
 // Write a debug line to stderr — visible in Zed via: Extensions › laravel-view-lsp log
 // (or command palette → "zed: open log")
@@ -44,10 +63,11 @@ function isPhpFile(uri)   { return uri.endsWith('.php') && !isBladeFile(uri); }
 // Return document text from cache, falling back to disk if the file was already
 // open when the LSP started (didOpen was never received for it).
 function getDocumentText(uri) {
-  if (documents[uri] !== undefined) return documents[uri];
+  const cached = documents.get(uri);
+  if (cached !== undefined) return cached;
   try {
     const text = fs.readFileSync(uriToPath(uri), 'utf8');
-    documents[uri] = text; // warm the cache so subsequent requests are free
+    setDocument(uri, text); // warm the cache so subsequent requests are free
     return text;
   } catch (_) { return ''; }
 }
@@ -233,7 +253,7 @@ function findControllerMethodAtPosition(text, line, character) {
  * Returns { uri, range } pointing to the method definition, or null if not found.
  */
 function resolveControllerMethod(className, methodName, root, pathToUri) {
-  const classEntry = discoverPhpClasses(root).find(c => c.className === className);
+  const classEntry = getAppClass(root, className);
   if (!classEntry) return null;
 
   let methodLine = null;
@@ -553,8 +573,7 @@ function resolveRelationDefinition(fileText, lineNum, character, root, pathToUri
     if (!relation) return null;
 
     // Find the model file via the class discovery cache
-    const { discoverPhpClasses } = require('./php/discovery');
-    const classEntry = discoverPhpClasses(root).find(c => c.className === className);
+    const classEntry = getAppClass(root, className);
     if (!classEntry || !classEntry.file) return null;
 
     // Scan the model file for the relation method definition line
@@ -616,11 +635,12 @@ function handleMessage(msg) {
     // Document sync
     case 'textDocument/didOpen': {
       const openUri = params.textDocument.uri;
-      documents[openUri] = params.textDocument.text;
+      setDocument(openUri, params.textDocument.text);
       if (isPhpFile(openUri)) invalidateCache();
       if (isPhpFile(openUri)   && openUri.includes('/app/View/Components/'))        invalidateComponentCache();
       if (isBladeFile(openUri) && openUri.includes('/resources/views/components/')) invalidateComponentCache();
-      if (isPhpFile(openUri)   && openUri.includes('/routes/'))  invalidateAllRouteCaches();
+      if (isPhpFile(openUri)   && openUri.includes('/routes/'))  { invalidateAllRouteCaches(); invalidateViewVarCache(); }
+      if (isPhpFile(openUri)   && openUri.includes('/app/') && !openUri.includes('/app/View/Components/')) invalidateViewVarCache();
       if (isPhpFile(openUri)   && openUri.includes('/config/'))  invalidateConfigCache();
       if (isPhpFile(openUri) && (openUri.includes('/app/Models/') || openUri.includes('/database/migrations/')))
           invalidateModelCache();
@@ -630,11 +650,12 @@ function handleMessage(msg) {
     case 'textDocument/didChange': {
       const changeUri = params.textDocument.uri;
       if (params.contentChanges.length > 0)
-        documents[changeUri] = params.contentChanges[params.contentChanges.length - 1].text;
-      if (isPhpFile(changeUri)) invalidateCache();
+        setDocument(changeUri, params.contentChanges[params.contentChanges.length - 1].text);
+      if (isPhpFile(changeUri)) debouncedInvalidateCache();
       if (isPhpFile(changeUri)   && changeUri.includes('/app/View/Components/'))        invalidateComponentCache();
       if (isBladeFile(changeUri) && changeUri.includes('/resources/views/components/')) invalidateComponentCache();
-      if (isPhpFile(changeUri)   && changeUri.includes('/routes/'))  invalidateAllRouteCaches();
+      if (isPhpFile(changeUri)   && changeUri.includes('/routes/'))  { invalidateAllRouteCaches(); invalidateViewVarCache(); }
+      if (isPhpFile(changeUri)   && changeUri.includes('/app/') && !changeUri.includes('/app/View/Components/')) invalidateViewVarCache();
       if (isPhpFile(changeUri)   && changeUri.includes('/config/'))  invalidateConfigCache();
       if (isPhpFile(changeUri) && (changeUri.includes('/app/Models/') || changeUri.includes('/database/migrations/')))
           invalidateModelCache();
@@ -642,7 +663,7 @@ function handleMessage(msg) {
     }
 
     case 'textDocument/didClose':
-      delete documents[params.textDocument.uri];
+      documents.delete(params.textDocument.uri);
       break;
 
     // Completions
@@ -713,7 +734,7 @@ function handleMessage(msg) {
           }
           // Method not found — offer to create it
           send({ jsonrpc: '2.0', id, result: null });
-          const classEntry = discoverPhpClasses(workspaceRoot).find(c => c.className === ctrlCtx.className);
+          const classEntry = getAppClass(workspaceRoot, ctrlCtx.className);
           if (classEntry) promptCreateMethod(classEntry.file, ctrlCtx.className, ctrlCtx.methodName);
           break;
         }

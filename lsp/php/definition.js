@@ -1,6 +1,6 @@
 'use strict';
 
-const { discoverPhpClasses } = require('./discovery');
+const { getAppClass } = require('./discovery');
 
 function phpDefinition(text, line, character, root, pathToUri) {
   const lineText = text.split('\n')[line] || '';
@@ -14,7 +14,7 @@ function phpDefinition(text, line, character, root, pathToUri) {
   // Only resolve words that start with an uppercase letter (class names)
   if (!/^[A-Z]/.test(word)) return null;
 
-  const found = discoverPhpClasses(root).find(c => c.className === word);
+  const found = getAppClass(root, word);
   if (!found) return null;
 
   return {
